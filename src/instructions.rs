@@ -1,8 +1,12 @@
-use crate::{Memory, Reg16, Reg8, RegFile};
+use crate::cpu::{Flags, Memory, Reg16, Reg8, RegFile};
 
 // 1 cycle 8 bit instructions
-pub fn instruction81(opcode: u8, reg_file: &mut RegFile, memory: &mut Memory) {
+pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
     match opcode {
+        0x00 => (),                                                          //NOOP
+        0x3f => reg_file.flags = (reg_file.flags ^ 0b00010000) & 0b10011111, //CCF
+        0x37 => reg_file.flags = (reg_file.flags | 0b00010000) & 0b10011111, //SCF
+
         0x40 => load8(reg_file, Reg8::B, reg_file.B),
         0x41 => load8(reg_file, Reg8::B, reg_file.C),
         0x42 => load8(reg_file, Reg8::B, reg_file.D),
@@ -51,7 +55,7 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile, memory: &mut Memory) {
         0x6D => load8(reg_file, Reg8::L, reg_file.L),
         0x6F => load8(reg_file, Reg8::L, reg_file.A),
 
-        0x76 => (), //HAlT
+        0x76 => (), //HALT
 
         0x78 => load8(reg_file, Reg8::A, reg_file.B),
         0x79 => load8(reg_file, Reg8::A, reg_file.C),
@@ -61,18 +65,91 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile, memory: &mut Memory) {
         0x7D => load8(reg_file, Reg8::A, reg_file.L),
         0x7F => load8(reg_file, Reg8::A, reg_file.A),
 
-        0xE9 => load16(reg_file, Reg16::PC, reg_file.get16(Reg16::HL)),
+        n @ (0x80..=0x8F) => {
+            let a = reg_file[Reg8::A];
+            let b = match n {
+                0x80 => reg_file[Reg8::B],
+                0x81 => reg_file[Reg8::C],
+                0x82 => reg_file[Reg8::D],
+                0x83 => reg_file[Reg8::E],
+                0x84 => reg_file[Reg8::H],
+                0x85 => reg_file[Reg8::L],
+                0x87 => reg_file[Reg8::A],
+                _ => panic!("Invalid instruction!"),
+            };
+
+            let val: u16 = match n {
+                0x80..=0x87 => a as u16 + b as u16 ,
+                _ => a as u16 + b as u16 + ((reg_file.flags & 0b00010000) >> 4) as u16,
+            };
+
+            load8(reg_file, Reg8::A, val as u8);
+            let mut flags: u8 = 0x0;
+            if (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10 {
+                // Half carry
+                flags = 0b00100000;
+            }
+            if val as u8 == 0 {
+                flags = flags | 0b10000000;
+            }
+            if val > 255 {
+		flags = flags | 0b00010000;
+	    }
+            reg_file.flags = flags;
+        }
+	n @ (0x90..=0x9F) => {
+	    let a = reg_file[Reg8::A];
+	    let b = match n {
+                0x90 => reg_file[Reg8::B],
+                0x91 => reg_file[Reg8::C],
+                0x92 => reg_file[Reg8::D],
+                0x93 => reg_file[Reg8::E],
+                0x94 => reg_file[Reg8::H],
+                0x95 => reg_file[Reg8::L],
+                0x97 => reg_file[Reg8::A],
+                _ => panic!("Invalid instruction!"),
+            };
+	    let mut flags: u8 = 0x0;
+	    let val = match n {
+		0x90..=0x97 => {
+		    if a < b {
+			flags = 0;
+		    }
+		    a - b
+		},
+		_ => {
+		    let comp = a - (b + ((reg_file.flags & 0b00010000) >> 4));
+		    
+		    comp
+		},
+	    };
+             {
+                // Half carry
+                flags = 0b00100000;
+            }
+            if val as u8 == 0 {
+                flags = flags | 0b10000000;
+            }
+            if val > 255 {
+		flags = flags | 0b00010000;
+	    }
+            reg_file.flags = flags;
+	}
+        
+
+        //0xE9 => load16(reg_file, Reg16::PC, reg_file.get16(Reg16::HL)),
         _ => panic!("Not an 8bit instruction!"),
     }
 }
 
 // Two cycle 8 bit instructions
-pub fn instruction82(opcode: u8, reg_file: &mut RegFile, memory: &mut Memory) {
+/*
+pub fn instruction82(opcode: u8, reg_file: &mut RegFile, memory: &mut [u8; 0xFFFF]) {
     match opcode {
-        0x02 => memory[reg_file.get16(Reg16::BC)] = reg_file.A,
-        0x12 => memory[reg_file.get16(Reg16::DE)] = reg_file.A,
+        0x02 => memory[reg_file.get16(Reg16::BC) as usize] = reg_file.A,
+        0x12 => memory[reg_file.get16(Reg16::DE)as usize] = reg_file.A,
         0x22 => {
-            memory[reg_file.get16(Reg16::HL)] = reg_file.A;
+            memory[reg_file.get16(Reg16::HL) as usize] = reg_file.A;
             reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) + 1);
         }
         0x32 => {
@@ -108,6 +185,7 @@ pub fn instruction82(opcode: u8, reg_file: &mut RegFile, memory: &mut Memory) {
         _ => panic!("Not an 8bit instruction with 2 cycles"),
     }
 }
+ */
 
 fn load8(reg_file: &mut RegFile, reg: Reg8, value: u8) {
     reg_file[reg] = value;
@@ -133,7 +211,7 @@ fn load16(reg_file: &mut RegFile, reg: Reg16, value: u16) {
             reg_file.H = hi;
             reg_file.L = lo;
         }
-        Reg16::PC => reg_file.PC = value,
+        // Reg16::PC => reg_file.PC = value,
         Reg16::SP => reg_file.SP = value,
     }
 }
