@@ -1,7 +1,8 @@
 # Rustboy
 ## Gameboy Emulator Written in Rust
-## Structure
-* instructions.rs contains most of the decoding of the assembly and the corresponding loads/stores \\
+## Progress
+### 9/15/20
+* instructions.rs contains most of the decoding of the assembly and the corresponding loads/stores
 * cpu.rs contains the execution loop of the cpu and the reg files/memory layout
   * Gameboy uses a Fetch/Execute overlap so certain instructions can fetch and execute in parallel across a clock cycle
 ## Sources
