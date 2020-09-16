@@ -1,4 +1,4 @@
-# rustboy
+# Rustboy
 ## Gameboy emulator written in Rust
 
 ## Sources
