@@ -1,5 +1,5 @@
 # Rustboy
-## Gameboy emulator written in Rust
+## Gameboy Emulator Written in Rust
 
 ## Sources
 https://realboyemulator.files.wordpress.com/2013/01/gbcpuman.pdf
