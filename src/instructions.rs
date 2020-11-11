@@ -64,8 +64,8 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
         0x7C => load8(reg_file, Reg8::A, reg_file.H),
         0x7D => load8(reg_file, Reg8::A, reg_file.L),
         0x7F => load8(reg_file, Reg8::A, reg_file.A),
-
-        n @ (0x80..=0x8F) => { // ADD/ADC
+        // ADD/ADC
+        n @ (0x80..=0x8F) => {
             let a = reg_file[Reg8::A];
             let b = match n {
                 0x80 | 0x88 => reg_file[Reg8::B],
@@ -77,39 +77,29 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
                 0x87 | 0x8F => reg_file[Reg8::A],
                 _ => panic!("Invalid instruction!"),
             };
-	    let mut flags: u8 = 0x0;
             let val: u16 = match n {
                 0x80..=0x87 => {
-		    if (((a & 0x0F) + (b & 0x0F)) & 0x10) == 0x10 {
-			// Half carry
-			flags = 0x20;
-		    }
-		    a as u16 + b as u16
-		},
+                    reg_file.set_flag(Flags::H, (((a & 0x0F) + (b & 0x0F)) & 0x10) == 0x10);
+                    a as u16 + b as u16
+                }
                 _ => {
-		    if (((a & 0x0F) + (b & 0x0F) + (reg_file.flags & 0b00010000) >> 4) & 0x10) == 0x10 {
-			// Half carry
-			flags = 0x20;
-		    }
-		    a as u16 + b as u16 + ((reg_file.flags & 0b00010000) >> 4) as u16
-		},
+                    reg_file.set_flag(
+                        Flags::H,
+                        (((a & 0x0F) + (b & 0x0F) + (reg_file.flags & 0b00010000) >> 4) & 0x10)
+                            == 0x10,
+                    );
+                    a as u16 + b as u16 + ((reg_file.flags & 0b00010000) >> 4) as u16
+                }
             };
+            reg_file.set_flag(Flags::Z, val as u8 == 0);
+            reg_file.set_flag(Flags::C, val > 255);
 
-
-            if val as u8 == 0 {
-		// Z bit
-                flags = flags | 0x80;
-            }
-            if val > 255 {
-		// Carry bit
-		flags = flags | 0x10;
-	    }
-	    load8(reg_file, Reg8::A, val as u8);
-            reg_file.flags = flags;
+            load8(reg_file, Reg8::A, val as u8);
         }
-	n @ ((0x90..=0x9F) | (0xB8..=0xBF)) => { // SUB/SBC/CP
-	    let a = reg_file[Reg8::A];
-	    let b = match n {
+        // SUB/SBC/CP
+        n @ ((0x90..=0x9F) | (0xB8..=0xBF)) => {
+            let a = reg_file[Reg8::A];
+            let b = match n {
                 0x90 | 0x98 | 0xB8 => reg_file[Reg8::B],
                 0x91 | 0x99 | 0xB9 => reg_file[Reg8::C],
                 0x92 | 0x9A | 0xBA => reg_file[Reg8::D],
@@ -119,40 +109,73 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
                 0x97 | 0x9F | 0xBF => reg_file[Reg8::A],
                 _ => panic!("Invalid instruction!"),
             };
-	    let mut flags: u8 = 0x40; // set the subtraction flag
+            //let mut flags: u8 = 0x40; // set the subtraction flag
+            reg_file.set_flag(Flags::N, true);
+            let val = match n {
+                0x90..=0x97 => {
+                    reg_file.set_flag(Flags::H, (a & 0x0F) < (b & 0x0F));
+                    (a - b) as i8
+                }
+                _ => {
+                    reg_file.set_flag(
+                        Flags::H,
+                        (((a & 0x0F) - ((b & 0x0F) + ((reg_file.flags & 0x10) >> 4))) as i8) < 0,
+                    );
+                    (a - (b + ((reg_file.flags & 0x10) >> 4))) as i8
+                }
+            };
+            reg_file.set_flag(Flags::Z, val as u8 == 0);
+            reg_file.set_flag(Flags::C, val < 0);
+
+            match n {
+                (0x90..=0x9F) => load8(reg_file, Reg8::A, val as u8),
+                _ => (),
+            }
+        }
+        n @ (0xA0..=0xA7) => {
+            let a = reg_file[Reg8::A];
+            let b = match n {
+                0xA0 => reg_file[Reg8::B],
+                0xA1 => reg_file[Reg8::C],
+                0xA2 => reg_file[Reg8::D],
+                0xA3 => reg_file[Reg8::E],
+                0xA4 => reg_file[Reg8::H],
+                0xA5 => reg_file[Reg8::L],
+                0xA7 => reg_file[Reg8::A],
+                _ => panic!("invalid instruction!"),
+            };
+
+            let val = a & b;
+            reg_file.set_flag(Flags::Z, val == 0);
+            reg_file.set_flag(Flags::N, false);
+            reg_file.set_flag(Flags::H, true);
+            reg_file.set_flag(Flags::C, false);
+	    load8(reg_file, Reg8::A, val);
+        }
+	n @ (0xA8..=0xB7) => {
+	    let a = reg_file[Reg8::A];
+            let b = match n {
+                0xB0 | 0xA8 => reg_file[Reg8::B],
+                0xB1 | 0xA9 => reg_file[Reg8::C],
+                0xB2 | 0xAA => reg_file[Reg8::D],
+                0xB3 | 0xAB => reg_file[Reg8::E],
+                0xB4 | 0xAC => reg_file[Reg8::H],
+                0xB5 | 0xAD => reg_file[Reg8::L],
+                0xB7 | 0xAF => reg_file[Reg8::A],
+                _ => panic!("invalid instruction!"),
+            };
 	    let val = match n {
-		0x90..=0x97 => {
-		    if (a & 0x0F) < (a & 0x0F) {
-			// Half carry
-			flags = flags | 0x20;
-		    }
-		    (a - b) as i8
-		},
-		_ => {
-		    if (((a & 0x0F) - ((b & 0x0F) + ((reg_file.flags & 0x10) >> 4))) as i8) < 0 {
-			// Half carry
-			flags = flags | 0x20;
-		    }
-		    (a - (b + ((reg_file.flags & 0x10) >> 4))) as i8
-		},
+		0xA8..=0xAF => a ^ b,
+		0xB0..=0xB7 => a | b,
+		_ => panic!("invalid instruction!"),
 	    };
 	    
-            if val as u8 == 0 {
-		// Z bit
-                flags = flags | 0x80;
-            }
-            if val < 0 {
-		// Carry bit
-		flags = flags | 0x10;
-	    }
-	    match n {
-		(0x90..=0x9F) => load8(reg_file, Reg8::A, val as u8),
-		_ => (),
-	    }
-	    
-            reg_file.flags = flags;
+	    reg_file.set_flag(Flags::Z, val == 0);
+            reg_file.set_flag(Flags::N, false);
+            reg_file.set_flag(Flags::H, false);
+            reg_file.set_flag(Flags::C, false);
+	    load8(reg_file, Reg8::A, val);
 	}
-        
 
         //0xE9 => load16(reg_file, Reg16::PC, reg_file.get16(Reg16::HL)),
         _ => panic!("Not an 8bit instruction!"),
