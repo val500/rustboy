@@ -1,12 +1,35 @@
 use crate::cpu::{Flags, Memory, Reg16, Reg8, RegFile};
 
-// 1 cycle 8 bit instructions
-pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
+pub fn instruction_decode(
+    opcode: u8,
+    reg_file: &mut RegFile,
+    mem: &mut Memory,
+    instruction_stage: u8,
+    passed: StagePassThrough,
+    pc: u16,
+) -> (u8, StagePassThrough) {
+    let mut new_instruction_stage = instruction_stage;
+    let mut pass_to_next_stage = StagePassThrough::default();
+    pass_to_next_stage.next_pc = pc + 1;
     match opcode {
-        0x00 => (),                                                          //NOOP
-        0x3f => reg_file.flags = (reg_file.flags ^ 0b00010000) & 0b10011111, //CCF
-        0x37 => reg_file.flags = (reg_file.flags | 0b00010000) & 0b10011111, //SCF
-
+        0x00 => (), //NOOP
+        0x2F => {
+            load8(reg_file, Reg8::A, !reg_file.A);
+            reg_file.flags.N = 1;
+            reg_file.flags.H = 1;
+        }
+        0x3f => {
+            // CCF
+            reg_file.flags.C = if reg_file.flags.C == 1 { 0 } else { 1 };
+            reg_file.flags.N = 0;
+            reg_file.flags.H = 0;
+        }
+        0x37 => {
+            // SCF
+            reg_file.flags.C = 1;
+            reg_file.flags.N = 0;
+            reg_file.flags.H = 0;
+        }
         0x40 => load8(reg_file, Reg8::B, reg_file.B),
         0x41 => load8(reg_file, Reg8::B, reg_file.C),
         0x42 => load8(reg_file, Reg8::B, reg_file.D),
@@ -67,165 +90,369 @@ pub fn instruction81(opcode: u8, reg_file: &mut RegFile) {
         // ADD/ADC
         n @ (0x80..=0x8F) => {
             let a = reg_file[Reg8::A];
-            let b = match n {
-                0x80 | 0x88 => reg_file[Reg8::B],
-                0x81 | 0x89 => reg_file[Reg8::C],
-                0x82 | 0x8A => reg_file[Reg8::D],
-                0x83 | 0x8B => reg_file[Reg8::E],
-                0x84 | 0x8C => reg_file[Reg8::H],
-                0x85 | 0x8D => reg_file[Reg8::L],
-                0x87 | 0x8F => reg_file[Reg8::A],
-                _ => panic!("Invalid instruction!"),
-            };
-            let val: u16 = match n {
-                0x80..=0x87 => {
-                    reg_file.set_flag(Flags::H, (((a & 0x0F) + (b & 0x0F)) & 0x10) == 0x10);
-                    a as u16 + b as u16
+            match instruction_stage {
+                0 => {
+                    let b = match n {
+                        0x80 | 0x88 => reg_file[Reg8::B],
+                        0x81 | 0x89 => reg_file[Reg8::C],
+                        0x82 | 0x8A => reg_file[Reg8::D],
+                        0x83 | 0x8B => reg_file[Reg8::E],
+                        0x84 | 0x8C => reg_file[Reg8::H],
+                        0x85 | 0x8D => reg_file[Reg8::L],
+                        0x86 | 0x8E => {
+                            mem.addr_bus = reg_file.get16(Reg16::HL);
+                            mem.read()
+                        }
+                        0x87 | 0x8F => reg_file[Reg8::A],
+			_ => panic!("invalid op"),
+                    };
+                    let (val, flags) = add(a, b);
+                    if n == 0x86 || n == 0x8E {
+                        new_instruction_stage = 1;
+                        pass_to_next_stage.data = val;
+                        pass_to_next_stage.flags = flags;
+			pass_to_next_stage.next_pc = pc;
+                    } else {
+                        load8(reg_file, Reg8::A, val);
+                        reg_file.flags = flags;
+                    }
                 }
-                _ => {
-                    reg_file.set_flag(
-                        Flags::H,
-                        (((a & 0x0F) + (b & 0x0F) + (reg_file.flags & 0b00010000) >> 4) & 0x10)
-                            == 0x10,
-                    );
-                    a as u16 + b as u16 + ((reg_file.flags & 0b00010000) >> 4) as u16
+                1 => {
+                    load8(reg_file, Reg8::A, passed.data);
+                    reg_file.flags = passed.flags;
+                    new_instruction_stage = 0;
                 }
+		_ => (),
             };
-            reg_file.set_flag(Flags::Z, val as u8 == 0);
-            reg_file.set_flag(Flags::C, val > 255);
-
-            load8(reg_file, Reg8::A, val as u8);
         }
         // SUB/SBC/CP
         n @ ((0x90..=0x9F) | (0xB8..=0xBF)) => {
             let a = reg_file[Reg8::A];
-            let b = match n {
-                0x90 | 0x98 | 0xB8 => reg_file[Reg8::B],
-                0x91 | 0x99 | 0xB9 => reg_file[Reg8::C],
-                0x92 | 0x9A | 0xBA => reg_file[Reg8::D],
-                0x93 | 0x9B | 0xBB => reg_file[Reg8::E],
-                0x94 | 0x9C | 0xBC => reg_file[Reg8::H],
-                0x95 | 0x9D | 0xBD => reg_file[Reg8::L],
-                0x97 | 0x9F | 0xBF => reg_file[Reg8::A],
-                _ => panic!("Invalid instruction!"),
-            };
-            //let mut flags: u8 = 0x40; // set the subtraction flag
-            reg_file.set_flag(Flags::N, true);
-            let val = match n {
-                0x90..=0x97 => {
-                    reg_file.set_flag(Flags::H, (a & 0x0F) < (b & 0x0F));
-                    (a - b) as i8
+            match new_instruction_stage {
+                0 => {
+                    let b = match n {
+                        0x90 | 0x98 | 0xB8 => reg_file[Reg8::B],
+                        0x91 | 0x99 | 0xB9 => reg_file[Reg8::C],
+                        0x92 | 0x9A | 0xBA => reg_file[Reg8::D],
+                        0x93 | 0x9B | 0xBB => reg_file[Reg8::E],
+                        0x94 | 0x9C | 0xBC => reg_file[Reg8::H],
+                        0x95 | 0x9D | 0xBD => reg_file[Reg8::L],
+                        0x96 | 0x9E | 0xBE => {
+                            mem.addr_bus = reg_file.get16(Reg16::HL);
+                            mem.read()
+                        }
+                        0x97 | 0x9F | 0xBF => reg_file[Reg8::A],
+                        _ => panic!("Invalid instruction!"),
+                    };
+                    //let mut flags: u8 = 0x40; // set the subtraction flag
+                    let (val, flags) = match n {
+                        0x90..=0x97 => sub(a, b),
+                        _ => subc(a, b, reg_file.flags.C),
+                    };
+                    match n {
+                        0x96 | 0x9E | 0xBE => {
+                            new_instruction_stage = 1;
+                            pass_to_next_stage.data = val;
+                            pass_to_next_stage.flags = flags;
+			    pass_to_next_stage.next_pc = pc;
+                        }
+                        (0x90..=0x9F) => {
+                            load8(reg_file, Reg8::A, val as u8);
+                            reg_file.flags = flags;
+                        }
+                        _ => (),
+                    }
                 }
-                _ => {
-                    reg_file.set_flag(
-                        Flags::H,
-                        (((a & 0x0F) - ((b & 0x0F) + ((reg_file.flags & 0x10) >> 4))) as i8) < 0,
-                    );
-                    (a - (b + ((reg_file.flags & 0x10) >> 4))) as i8
+                1 => {
+                    if n != 0xBE {
+                        load8(reg_file, Reg8::A, passed.data);
+                    }
+                    reg_file.flags = passed.flags;
+                    new_instruction_stage = 0;
                 }
-            };
-            reg_file.set_flag(Flags::Z, val as u8 == 0);
-            reg_file.set_flag(Flags::C, val < 0);
-
-            match n {
-                (0x90..=0x9F) => load8(reg_file, Reg8::A, val as u8),
-                _ => (),
+		_ => (),
             }
         }
-        n @ (0xA0..=0xA7) => {
-            let a = reg_file[Reg8::A];
-            let b = match n {
-                0xA0 => reg_file[Reg8::B],
-                0xA1 => reg_file[Reg8::C],
-                0xA2 => reg_file[Reg8::D],
-                0xA3 => reg_file[Reg8::E],
-                0xA4 => reg_file[Reg8::H],
-                0xA5 => reg_file[Reg8::L],
-                0xA7 => reg_file[Reg8::A],
-                _ => panic!("invalid instruction!"),
-            };
+        // AND instructions
+        n @ (0xA0..=0xA7) => match instruction_stage {
+            0 => {
+                let a = reg_file[Reg8::A];
+                let b = match n {
+                    0xA0 => reg_file[Reg8::B],
+                    0xA1 => reg_file[Reg8::C],
+                    0xA2 => reg_file[Reg8::D],
+                    0xA3 => reg_file[Reg8::E],
+                    0xA4 => reg_file[Reg8::H],
+                    0xA5 => reg_file[Reg8::L],
+                    0xA6 => {
+                        mem.addr_bus = reg_file.get16(Reg16::HL);
+                        mem.read()
+                    }
+                    0xA7 => reg_file[Reg8::A],
+                    _ => panic!("invalid instruction!"),
+                };
+                let (val, flags) = and(a, b);
+                if n == 0xA6 {
+                    new_instruction_stage = 1;
+                    pass_to_next_stage.data = val;
+                    pass_to_next_stage.flags = flags;
+		    pass_to_next_stage.next_pc = pc;
+                } else {
+                    load8(reg_file, Reg8::A, val);
+                    reg_file.flags = flags;
+                }
+            }
+            1 => {
+                new_instruction_stage = 0;
+                load8(reg_file, Reg8::A, passed.data);
+                reg_file.flags = passed.flags;
+            }
+	    _ => (),
+        },
+        // XOR/OR instructions
+        n @ (0xA8..=0xB7) => match instruction_stage {
+            0 => {
+                let a = reg_file[Reg8::A];
+                let b = match n {
+                    0xB0 | 0xA8 => reg_file[Reg8::B],
+                    0xB1 | 0xA9 => reg_file[Reg8::C],
+                    0xB2 | 0xAA => reg_file[Reg8::D],
+                    0xB3 | 0xAB => reg_file[Reg8::E],
+                    0xB4 | 0xAC => reg_file[Reg8::H],
+                    0xB5 | 0xAD => reg_file[Reg8::L],
+                    0xB6 | 0xAE => {
+                        mem.addr_bus = reg_file.get16(Reg16::HL);
+                        mem.read()
+                    }
+                    0xB7 | 0xAF => reg_file[Reg8::A],
+                    _ => panic!("invalid instruction!"),
+                };
+                let (val, flags) = match n {
+                    0xA8..=0xAF => xor(a, b),
+                    0xB0..=0xB7 => or(a, b),
+                    _ => panic!("invalid instruction!"),
+                };
 
-            let val = a & b;
-            reg_file.set_flag(Flags::Z, val == 0);
-            reg_file.set_flag(Flags::N, false);
-            reg_file.set_flag(Flags::H, true);
-            reg_file.set_flag(Flags::C, false);
-	    load8(reg_file, Reg8::A, val);
-        }
-	n @ (0xA8..=0xB7) => {
-	    let a = reg_file[Reg8::A];
-            let b = match n {
-                0xB0 | 0xA8 => reg_file[Reg8::B],
-                0xB1 | 0xA9 => reg_file[Reg8::C],
-                0xB2 | 0xAA => reg_file[Reg8::D],
-                0xB3 | 0xAB => reg_file[Reg8::E],
-                0xB4 | 0xAC => reg_file[Reg8::H],
-                0xB5 | 0xAD => reg_file[Reg8::L],
-                0xB7 | 0xAF => reg_file[Reg8::A],
-                _ => panic!("invalid instruction!"),
-            };
-	    let val = match n {
-		0xA8..=0xAF => a ^ b,
-		0xB0..=0xB7 => a | b,
-		_ => panic!("invalid instruction!"),
-	    };
+                if n == 0xB6 || n == 0xAE {
+                    new_instruction_stage = 1;
+                    pass_to_next_stage.data = val;
+                    pass_to_next_stage.flags = flags;
+		    pass_to_next_stage.next_pc = pc;
+                } else {
+                    load8(reg_file, Reg8::A, val);
+                    reg_file.flags = flags;
+                }
+            }
+            1 => {
+                new_instruction_stage = 0;
+                load8(reg_file, Reg8::A, passed.data);
+                reg_file.flags = passed.flags;
+            }
+	    _ => (),
+        },
+        n @ (0x04 | 0x14 | 0x24 | 0x34 | 0x0C | 0x1C | 0x2C | 0x3C) => match instruction_stage {
+            // INC instructions
+            0 => {
+                let a = match n {
+                    0x04 => reg_file[Reg8::B],
+                    0x14 => reg_file[Reg8::D],
+                    0x24 => reg_file[Reg8::H],
+                    0x34 => {
+                        mem.addr_bus = reg_file.get16(Reg16::HL);
+                        mem.read()
+                    }
+                    0x0C => reg_file[Reg8::C],
+                    0x1C => reg_file[Reg8::E],
+                    0x2C => reg_file[Reg8::L],
+                    0x3C => reg_file[Reg8::A],
+                    _ => panic!("invalid instruction"),
+                };
+                let mut flags = Flags::default();
+                flags.Z = if (a + 1) == 0 { 1 } else { 0 };
+                flags.N = 0;
+                flags.H = if (a & 0x07) == 7 { 1 } else { 0 };
+                match n {
+                    0x04 => load8(reg_file, Reg8::B, a + 1),
+                    0x14 => load8(reg_file, Reg8::D, a + 1),
+                    0x24 => load8(reg_file, Reg8::H, a + 1),
+                    0x0C => load8(reg_file, Reg8::C, a + 1),
+                    0x1C => load8(reg_file, Reg8::E, a + 1),
+                    0x2C => load8(reg_file, Reg8::L, a + 1),
+                    0x3C => load8(reg_file, Reg8::A, a + 1),
+                    _ => panic!("invalid instruction"),
+                };
+                if n == 0x34 {
+                    new_instruction_stage = 1;
+                    pass_to_next_stage.data = a + 1;
+                    pass_to_next_stage.flags = flags;
+		    pass_to_next_stage.next_pc = pc;
+                } else {
+                    reg_file.flags = flags;
+                }
+            }
+            1 => {
+                mem.addr_bus = reg_file.get16(Reg16::HL);
+                mem.write_data(passed.data);
+                new_instruction_stage = 2;
+		pass_to_next_stage.next_pc = pc;
+            }
+            2 => {
+                new_instruction_stage = 0;
+            }
+	    _ => (),
+        },
+        n @ (0x05 | 0x15 | 0x25 | 0x0D | 0x1D | 0x2D | 0x3D) => match instruction_stage {
+            // DEC instructions
+            0 => {
+                let a = match n {
+                    0x05 => reg_file[Reg8::B],
+                    0x15 => reg_file[Reg8::D],
+                    0x25 => reg_file[Reg8::H],
+                    0x35 => {
+                        mem.addr_bus = reg_file.get16(Reg16::HL);
+                        mem.read()
+                    }
+                    0x0D => reg_file[Reg8::C],
+                    0x1D => reg_file[Reg8::E],
+                    0x2D => reg_file[Reg8::L],
+                    0x3D => reg_file[Reg8::A],
+                    _ => panic!("invalid instruction"),
+                };
+                let mut flags = Flags::default();
+                flags.Z = if (a as i8 - 1) == 0 { 1 } else { 0 };
+                flags.N = 0;
+                flags.H = if (a & 0x07) == 0 { 1 } else { 0 };
+
+                match n {
+                    0x05 => load8(reg_file, Reg8::B, a - 1),
+                    0x15 => load8(reg_file, Reg8::D, a - 1),
+                    0x25 => load8(reg_file, Reg8::H, a - 1),
+                    0x0D => load8(reg_file, Reg8::C, a - 1),
+                    0x1D => load8(reg_file, Reg8::E, a - 1),
+                    0x2D => load8(reg_file, Reg8::L, a - 1),
+                    0x3D => load8(reg_file, Reg8::A, a - 1),
+                    _ => panic!("invalid instruction"),
+                };
+		if n == 0x35 {
+		    new_instruction_stage = 1;
+		    pass_to_next_stage.data = a - 1;
+		    pass_to_next_stage.flags = flags;
+		    pass_to_next_stage.next_pc = pc;
+		} else {
+		    reg_file.flags = flags;
+		}
+            }
+	    1 => {
+		new_instruction_stage = 2;
+		pass_to_next_stage.next_pc = pc;
+		mem.addr_bus = reg_file.get16(Reg16::HL);
+		mem.write_data(passed.data);
+	    }
+	    2 => {
+		new_instruction_stage = 0;
+	    }
+	    _ => (),
 	    
-	    reg_file.set_flag(Flags::Z, val == 0);
-            reg_file.set_flag(Flags::N, false);
-            reg_file.set_flag(Flags::H, false);
-            reg_file.set_flag(Flags::C, false);
-	    load8(reg_file, Reg8::A, val);
-	}
-
-        //0xE9 => load16(reg_file, Reg16::PC, reg_file.get16(Reg16::HL)),
+        },
+        0xE9 => pass_to_next_stage.next_pc = reg_file.get16(Reg16::HL),
         _ => panic!("Not an 8bit instruction!"),
     }
+    (new_instruction_stage, pass_to_next_stage)
 }
 
-// Two cycle 8 bit instructions
-/*
-pub fn instruction82(opcode: u8, reg_file: &mut RegFile, memory: &mut [u8; 0xFFFF]) {
+fn add(a: u8, b: u8) -> (u8, Flags) {
+    let val: u16 = a as u16 + b as u16;
+    let mut flags = Flags::default();
+    flags.H = if (((a & 0x0F) + (b & 0x0F)) & 0x10) == 0x10 {
+        1
+    } else {
+        0
+    };
+    flags.Z = if val as u8 == 0 { 1 } else { 0 };
+    flags.C = if val > 255 { 1 } else { 0 };
+    (val as u8, flags)
+}
+
+fn adc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
+    let val = a as u16 + b as u16 + carry as u16 >> 4 as u16;
+    let mut flags = Flags::default();
+    flags.H = if (((a & 0x0F) + (b & 0x0F) + carry) & 0x10) == 0x10 {
+        1
+    } else {
+        0
+    };
+    flags.Z = if val as u8 == 0 { 1 } else { 0 };
+    flags.C = if val > 255 { 1 } else { 0 };
+
+    (val as u8, flags)
+}
+
+fn sub(a: u8, b: u8) -> (u8, Flags) {
+    let val = (a - b) as i8;
+    let mut flags = Flags::default();
+    flags.N = 1;
+    flags.H = if (a & 0x0F) < (b & 0x0F) { 1 } else { 0 };
+    flags.Z = if val == 0 { 1 } else { 0 };
+    flags.C = if val < 0 { 1 } else { 0 };
+    (val as u8, flags)
+}
+
+fn subc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
+    let val = (a - (b + carry)) as i8;
+    let mut flags = Flags::default();
+    flags.N = 1;
+    flags.H = if (((a & 0x0F) - ((b * 0x0F) + carry)) as i8) < 0 {
+        1
+    } else {
+        0
+    };
+    flags.C = if val < 0 { 1 } else { 0 };
+    flags.Z = if val == 0 { 1 } else { 0 };
+    (val as u8, flags)
+}
+
+fn and(a: u8, b: u8) -> (u8, Flags) {
+    let val = a & b;
+    let mut flags = Flags::default();
+    flags.Z = if val == 0 { 1 } else { 0 };
+    flags.N = 0;
+    flags.H = 1;
+    flags.C = 0;
+    (val, flags)
+}
+
+fn xor(a: u8, b: u8) -> (u8, Flags) {
+    let val = a ^ b;
+    let mut flags = Flags::default();
+    flags.Z = if val == 0 { 1 } else { 0 };
+    flags.N = 0;
+    flags.H = 0;
+    flags.C = 0;
+    (val, flags)
+}
+
+fn or(a: u8, b: u8) -> (u8, Flags) {
+    let val = a | b;
+    let mut flags = Flags::default();
+    flags.Z = if val == 0 { 1 } else { 0 };
+    flags.N = 0;
+    flags.H = 0;
+    flags.C = 0;
+    (val, flags)
+}
+
+
+#[derive(Clone, Copy, Default)]
+pub struct StagePassThrough {
+    data: u8,
+    flags: Flags,
+    pub next_pc: u16,
+}
+pub fn instruction82RW(opcode: u8, reg_file: &mut RegFile, data: u8) {
     match opcode {
-        0x02 => memory[reg_file.get16(Reg16::BC) as usize] = reg_file.A,
-        0x12 => memory[reg_file.get16(Reg16::DE)as usize] = reg_file.A,
-        0x22 => {
-            memory[reg_file.get16(Reg16::HL) as usize] = reg_file.A;
-            reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) + 1);
-        }
-        0x32 => {
-            memory[reg_file.get16(Reg16::HL)] = reg_file.A;
-            reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) - 1);
-        }
-        0x0A => load8(reg_file, Reg8::A, memory[reg_file.get16(Reg16::BC)]),
-        0x1A => load8(reg_file, Reg8::A, memory[reg_file.get16(Reg16::DE)]),
-        0x2A => {
-            load8(reg_file, Reg8::A, memory[reg_file.get16(Reg16::HL)]);
-            reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) + 1);
-        }
-        0x3A => {
-            load8(reg_file, Reg8::A, memory[reg_file.get16(Reg16::HL)]);
-            reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) - 1);
-        }
-        0x46 => load8(reg_file, Reg8::B, memory[reg_file.get16(Reg16::HL)]),
-        0x4E => load8(reg_file, Reg8::C, memory[reg_file.get16(Reg16::HL)]),
-        0x56 => load8(reg_file, Reg8::D, memory[reg_file.get16(Reg16::HL)]),
-        0x5E => load8(reg_file, Reg8::E, memory[reg_file.get16(Reg16::HL)]),
-        0x66 => load8(reg_file, Reg8::H, memory[reg_file.get16(Reg16::HL)]),
-        0x6E => load8(reg_file, Reg8::L, memory[reg_file.get16(Reg16::HL)]),
-        0x7E => load8(reg_file, Reg8::A, memory[reg_file.get16(Reg16::HL)]),
-        0x70 => memory[reg_file.get16(Reg16::HL)] = reg_file.B,
-        0x71 => memory[reg_file.get16(Reg16::HL)] = reg_file.C,
-        0x72 => memory[reg_file.get16(Reg16::HL)] = reg_file.D,
-        0x73 => memory[reg_file.get16(Reg16::HL)] = reg_file.E,
-        0x74 => memory[reg_file.get16(Reg16::HL)] = reg_file.H,
-        0x75 => memory[reg_file.get16(Reg16::HL)] = reg_file.L,
-        0x77 => memory[reg_file.get16(Reg16::HL)] = reg_file.A,
-        0xE2 => memory[(0xFF as u16) << 8 | reg_file[Reg8::C] as u16] = reg_file.A,
-        0xF2 => reg_file[Reg8::A] = memory[(0xFF as u16) << 8 | reg_file[Reg8::C] as u16],
-        _ => panic!("Not an 8bit instruction with 2 cycles"),
+        _ => panic!("not a 8bit 2 cycle instruction!"),
     }
 }
- */
 
 fn load8(reg_file: &mut RegFile, reg: Reg8, value: u8) {
     reg_file[reg] = value;

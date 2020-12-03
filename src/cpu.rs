@@ -1,40 +1,37 @@
-use crate::instructions::instruction81;
-use std::{
-    collections::HashMap,
-    ops::{Index, IndexMut},
-};
+use crate::instructions::{instruction_decode, StagePassThrough};
+use std::ops::{Index, IndexMut};
 
 pub struct CPU {
     reg_file: RegFile,
     memory: Memory,
     pc: u16,
-    instruction_map: HashMap<u8, InstructionType>,
 }
+
 impl CPU {
     pub fn execute(&mut self) {
         let mut instruction: u8 = 0x0000;
+        let mut instruction_stage = 0;
+        let mut pass = StagePassThrough::default();
+	pass.next_pc = self.pc + 1;
         loop {
-            match self.instruction_map[&instruction] {
-                InstructionType::EightOne => {
-                    if instruction == 0xE9 {
-                        // JP HL
-                        self.pc = self.reg_file.get16(Reg16::HL);
-                    } else {
-                        instruction81(instruction, &mut self.reg_file);
-                    }
-                    self.memory.addr_bus = self.pc;
-                    instruction = self.memory.read();
-                    self.pc = self.pc + 1;
-                }
-                InstructionType::EightTwo => {}
-            }
+            let tup = instruction_decode(
+                instruction,
+                &mut self.reg_file,
+                &mut self.memory,
+                instruction_stage,
+                pass,
+		self.pc,
+            );
+	    instruction_stage = tup.0;
+	    pass = tup.1;
+	    
+	    if instruction_stage == 0 {
+		self.memory.addr_bus = self.pc;
+		instruction = self.memory.read();
+	    }
+	    self.pc = pass.next_pc;
         }
     }
-}
-
-pub enum InstructionType {
-    EightOne, // 1 byte, 1 cycle
-    EightTwo, // 1 byte, 2 cycle
 }
 
 pub enum Reg8 {
@@ -57,11 +54,12 @@ pub enum Reg16 {
     SP,
 }
 
-pub enum Flags {
-    Z,
-    N,
-    H,
-    C,
+#[derive(Clone, Copy, Default)]
+pub struct Flags {
+    pub Z: u8,
+    pub N: u8,
+    pub H: u8,
+    pub C: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -76,11 +74,11 @@ pub struct RegFile {
     pub L: u8,
     pub SP: u16,
     // pub PC: u16,
-    pub flags: u8,
+    pub flags: Flags,
 }
 
 pub struct Memory {
-    addr_bus: u16,
+    pub addr_bus: u16,
     boot_rom: [u8; 0x00FF],        // 0x0000 - 0x00FF
     game_rom_bank0: [u8; 0x3FFF],  // 0x0000 - 0x3FFF
     game_rom_bankn: [u8; 0x3FFF],  // 0x4000 - 0x7FFF
@@ -113,6 +111,24 @@ impl Memory {
             0xFFFF => self.interrupt_enable_register,
             _ => 0,
         }
+    }
+    pub fn write_data(&mut self, data: u8) {
+        let addr = self.addr_bus as usize;
+        match addr {
+            0x0000..=0x3FFF => self.boot_rom[addr] = data,
+            0x4000..=0x7FFF => self.game_rom_bank0[addr - 0x4000] = data,
+            0x8000..=0x97FF => self.game_rom_bankn[addr - 0x8000] = data,
+            0x9800..=0x9FFF => self.tile_ram[addr - 0x9800] = data,
+            0xA000..=0xBFFF => self.cartridge_ram[addr - 0xA000] = data,
+            0xC000..=0xDFFF => self.working_ram[addr - 0xC000] = data,
+            0xE000..=0xFDFF => self.echo_ram[addr - 0xE000] = data,
+            0xFE00..=0xFE9F => self.oam[addr - 0xFE00] = data,
+            0xFEA0..=0xFEFF => (),
+            0xFF00..=0xFF7F => self.io_registers[addr - 0xFF00] = data,
+            0xFF80..=0xFFFE => self.high_ram[addr - 0xFF80] = data,
+            0xFFFF => self.interrupt_enable_register = data,
+            _ => (),
+        };
     }
 }
 
@@ -147,39 +163,6 @@ impl RegFile {
             Reg16::DE => (self.D as u16) << 8 | (self.E as u16),
             Reg16::HL => (self.H as u16) << 8 | (self.L as u16),
             Reg16::SP => self.SP,
-        }
-    }
-
-    pub fn set_flag(&mut self, flag: Flags, val: bool) {
-        match flag {
-            Flags::Z => {
-                self.flags = if val {
-                    0b10000000 | self.flags
-                } else {
-                    0b01111111 & self.flags
-                }
-            }
-            Flags::N => {
-                self.flags = if val {
-                    0b01000000 | self.flags
-                } else {
-                    0b10111111 & self.flags
-                }
-            }
-            Flags::H => {
-                self.flags = if val {
-                    0b00100000 | self.flags
-                } else {
-                    0b11011111 & self.flags
-                }
-            }
-            Flags::C => {
-                self.flags = if val {
-                    0b00010000 | self.flags
-                } else {
-                    0b11101111 & self.flags
-                }
-            }
         }
     }
 }
