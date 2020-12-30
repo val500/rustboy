@@ -78,6 +78,27 @@ pub fn instruction_decode(
         0x6D => load8(reg_file, Reg8::L, reg_file.L),
         0x6F => load8(reg_file, Reg8::L, reg_file.A),
 
+        n @ (0x70..=0x75 | 0x77) => match instruction_stage {
+            0 => {
+                new_instruction_stage = 1;
+                pass_to_next_stage.data = match n {
+                    0x70 => reg_file[Reg8::B],
+                    0x71 => reg_file[Reg8::C],
+                    0x72 => reg_file[Reg8::D],
+                    0x73 => reg_file[Reg8::E],
+                    0x74 => reg_file[Reg8::H],
+                    0x75 => reg_file[Reg8::L],
+                    0x77 => reg_file[Reg8::A],
+                    _ => panic!("invalid op"),
+                }
+            }
+            1 => {
+                mem.addr_bus = reg_file.get16(Reg16::HL);
+                mem.write_data(passed.data);
+                new_instruction_stage = 0;
+            }
+            _ => panic!("0x70-0x75: invalid instruction stage"),
+        },
         0x76 => (), //HALT
 
         0x78 => load8(reg_file, Reg8::A, reg_file.B),
@@ -104,14 +125,14 @@ pub fn instruction_decode(
                             mem.read()
                         }
                         0x87 | 0x8F => reg_file[Reg8::A],
-			_ => panic!("invalid op"),
+                        _ => panic!("invalid op"),
                     };
                     let (val, flags) = add(a, b);
                     if n == 0x86 || n == 0x8E {
                         new_instruction_stage = 1;
                         pass_to_next_stage.data = val;
                         pass_to_next_stage.flags = flags;
-			pass_to_next_stage.next_pc = pc;
+                        pass_to_next_stage.next_pc = pc;
                     } else {
                         load8(reg_file, Reg8::A, val);
                         reg_file.flags = flags;
@@ -122,7 +143,7 @@ pub fn instruction_decode(
                     reg_file.flags = passed.flags;
                     new_instruction_stage = 0;
                 }
-		_ => (),
+                _ => (),
             };
         }
         // SUB/SBC/CP
@@ -154,7 +175,7 @@ pub fn instruction_decode(
                             new_instruction_stage = 1;
                             pass_to_next_stage.data = val;
                             pass_to_next_stage.flags = flags;
-			    pass_to_next_stage.next_pc = pc;
+                            pass_to_next_stage.next_pc = pc;
                         }
                         (0x90..=0x9F) => {
                             load8(reg_file, Reg8::A, val as u8);
@@ -170,7 +191,7 @@ pub fn instruction_decode(
                     reg_file.flags = passed.flags;
                     new_instruction_stage = 0;
                 }
-		_ => (),
+                _ => (),
             }
         }
         // AND instructions
@@ -196,7 +217,7 @@ pub fn instruction_decode(
                     new_instruction_stage = 1;
                     pass_to_next_stage.data = val;
                     pass_to_next_stage.flags = flags;
-		    pass_to_next_stage.next_pc = pc;
+                    pass_to_next_stage.next_pc = pc;
                 } else {
                     load8(reg_file, Reg8::A, val);
                     reg_file.flags = flags;
@@ -207,7 +228,7 @@ pub fn instruction_decode(
                 load8(reg_file, Reg8::A, passed.data);
                 reg_file.flags = passed.flags;
             }
-	    _ => (),
+            _ => (),
         },
         // XOR/OR instructions
         n @ (0xA8..=0xB7) => match instruction_stage {
@@ -237,7 +258,7 @@ pub fn instruction_decode(
                     new_instruction_stage = 1;
                     pass_to_next_stage.data = val;
                     pass_to_next_stage.flags = flags;
-		    pass_to_next_stage.next_pc = pc;
+                    pass_to_next_stage.next_pc = pc;
                 } else {
                     load8(reg_file, Reg8::A, val);
                     reg_file.flags = flags;
@@ -248,7 +269,7 @@ pub fn instruction_decode(
                 load8(reg_file, Reg8::A, passed.data);
                 reg_file.flags = passed.flags;
             }
-	    _ => (),
+            _ => (),
         },
         n @ (0x04 | 0x14 | 0x24 | 0x34 | 0x0C | 0x1C | 0x2C | 0x3C) => match instruction_stage {
             // INC instructions
@@ -285,7 +306,7 @@ pub fn instruction_decode(
                     new_instruction_stage = 1;
                     pass_to_next_stage.data = a + 1;
                     pass_to_next_stage.flags = flags;
-		    pass_to_next_stage.next_pc = pc;
+                    pass_to_next_stage.next_pc = pc;
                 } else {
                     reg_file.flags = flags;
                 }
@@ -294,12 +315,12 @@ pub fn instruction_decode(
                 mem.addr_bus = reg_file.get16(Reg16::HL);
                 mem.write_data(passed.data);
                 new_instruction_stage = 2;
-		pass_to_next_stage.next_pc = pc;
+                pass_to_next_stage.next_pc = pc;
             }
             2 => {
                 new_instruction_stage = 0;
             }
-	    _ => (),
+            _ => (),
         },
         n @ (0x05 | 0x15 | 0x25 | 0x0D | 0x1D | 0x2D | 0x3D) => match instruction_stage {
             // DEC instructions
@@ -333,26 +354,25 @@ pub fn instruction_decode(
                     0x3D => load8(reg_file, Reg8::A, a - 1),
                     _ => panic!("invalid instruction"),
                 };
-		if n == 0x35 {
-		    new_instruction_stage = 1;
-		    pass_to_next_stage.data = a - 1;
-		    pass_to_next_stage.flags = flags;
-		    pass_to_next_stage.next_pc = pc;
-		} else {
-		    reg_file.flags = flags;
-		}
+                if n == 0x35 {
+                    new_instruction_stage = 1;
+                    pass_to_next_stage.data = a - 1;
+                    pass_to_next_stage.flags = flags;
+                    pass_to_next_stage.next_pc = pc;
+                } else {
+                    reg_file.flags = flags;
+                }
             }
-	    1 => {
-		new_instruction_stage = 2;
-		pass_to_next_stage.next_pc = pc;
-		mem.addr_bus = reg_file.get16(Reg16::HL);
-		mem.write_data(passed.data);
-	    }
-	    2 => {
-		new_instruction_stage = 0;
-	    }
-	    _ => (),
-	    
+            1 => {
+                new_instruction_stage = 2;
+                pass_to_next_stage.next_pc = pc;
+                mem.addr_bus = reg_file.get16(Reg16::HL);
+                mem.write_data(passed.data);
+            }
+            2 => {
+                new_instruction_stage = 0;
+            }
+            _ => (),
         },
         0xE9 => pass_to_next_stage.next_pc = reg_file.get16(Reg16::HL),
         _ => panic!("Not an 8bit instruction!"),
@@ -375,7 +395,7 @@ fn add(a: u8, b: u8) -> (u8, Flags) {
 
 fn adc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
     if carry > 1 {
-	panic!("ADC: carry is greater than one");
+        panic!("ADC: carry is greater than one");
     }
     let val = a as u16 + b as u16 + carry as u16 >> 4 as u16;
     let mut flags = Flags::default();
@@ -402,7 +422,7 @@ fn sub(a: u8, b: u8) -> (u8, Flags) {
 
 fn subc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
     if carry > 1 {
-	panic!("SUBC: carry is greater than one");
+        panic!("SUBC: carry is greater than one");
     }
     let val = (a - (b + carry)) as i8;
     let mut flags = Flags::default();
@@ -447,7 +467,6 @@ fn or(a: u8, b: u8) -> (u8, Flags) {
     (val, flags)
 }
 
-
 #[derive(Clone, Copy, Default)]
 pub struct StagePassThrough {
     data: u8,
@@ -487,27 +506,26 @@ fn load16(reg_file: &mut RegFile, reg: Reg16, value: u16) {
 #[cfg(test)]
 mod test {
     use super::*;
-    
+
     #[test]
     fn test_add() {
-	let mut flags = Flags::default();
-	let mut test_tup = add(1, 1);
-	assert_eq!(test_tup.0, 2);
-	assert_eq!(test_tup.1, flags);
+        let mut flags = Flags::default();
+        let mut test_tup = add(1, 1);
+        assert_eq!(test_tup.0, 2);
+        assert_eq!(test_tup.1, flags);
 
-	flags = Flags::default();
-	flags.H = 1;
-	flags.Z = 1;
-	flags.C = 1;
-	test_tup = add(255, 1);
-	assert_eq!(test_tup.0, 0);
-	assert_eq!(test_tup.1, flags);
+        flags = Flags::default();
+        flags.H = 1;
+        flags.Z = 1;
+        flags.C = 1;
+        test_tup = add(255, 1);
+        assert_eq!(test_tup.0, 0);
+        assert_eq!(test_tup.1, flags);
 
-	flags = Flags::default();
-	flags.H = 1;
-	test_tup = add(63, 1);
-	assert_eq!(test_tup.0, 64);
-	assert_eq!(test_tup.1, flags);
-
+        flags = Flags::default();
+        flags.H = 1;
+        test_tup = add(63, 1);
+        assert_eq!(test_tup.0, 64);
+        assert_eq!(test_tup.1, flags);
     }
 }
