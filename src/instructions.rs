@@ -374,6 +374,9 @@ fn add(a: u8, b: u8) -> (u8, Flags) {
 }
 
 fn adc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
+    if carry > 1 {
+	panic!("ADC: carry is greater than one");
+    }
     let val = a as u16 + b as u16 + carry as u16 >> 4 as u16;
     let mut flags = Flags::default();
     flags.H = if (((a & 0x0F) + (b & 0x0F) + carry) & 0x10) == 0x10 {
@@ -398,6 +401,9 @@ fn sub(a: u8, b: u8) -> (u8, Flags) {
 }
 
 fn subc(a: u8, b: u8, carry: u8) -> (u8, Flags) {
+    if carry > 1 {
+	panic!("SUBC: carry is greater than one");
+    }
     let val = (a - (b + carry)) as i8;
     let mut flags = Flags::default();
     flags.N = 1;
@@ -448,11 +454,6 @@ pub struct StagePassThrough {
     flags: Flags,
     pub next_pc: u16,
 }
-pub fn instruction82RW(opcode: u8, reg_file: &mut RegFile, data: u8) {
-    match opcode {
-        _ => panic!("not a 8bit 2 cycle instruction!"),
-    }
-}
 
 fn load8(reg_file: &mut RegFile, reg: Reg8, value: u8) {
     reg_file[reg] = value;
@@ -480,5 +481,33 @@ fn load16(reg_file: &mut RegFile, reg: Reg16, value: u16) {
         }
         // Reg16::PC => reg_file.PC = value,
         Reg16::SP => reg_file.SP = value,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    
+    #[test]
+    fn test_add() {
+	let mut flags = Flags::default();
+	let mut test_tup = add(1, 1);
+	assert_eq!(test_tup.0, 2);
+	assert_eq!(test_tup.1, flags);
+
+	flags = Flags::default();
+	flags.H = 1;
+	flags.Z = 1;
+	flags.C = 1;
+	test_tup = add(255, 1);
+	assert_eq!(test_tup.0, 0);
+	assert_eq!(test_tup.1, flags);
+
+	flags = Flags::default();
+	flags.H = 1;
+	test_tup = add(63, 1);
+	assert_eq!(test_tup.0, 64);
+	assert_eq!(test_tup.1, flags);
+
     }
 }

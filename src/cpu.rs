@@ -54,7 +54,7 @@ pub enum Reg16 {
     SP,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Flags {
     pub Z: u8,
     pub N: u8,
