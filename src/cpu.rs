@@ -10,22 +10,16 @@ pub struct CPU {
 impl CPU {
     pub fn execute(&mut self) {
         let mut instruction: u8 = 0x0000;
-        let mut instruction_stage = 0;
         let mut pass = StagePassThrough::default();
 	pass.next_pc = self.pc + 1;
         loop {
-            let tup = instruction_decode(
+            let pass = instruction_decode(
                 instruction,
                 &mut self.reg_file,
                 &mut self.memory,
-                instruction_stage,
                 pass,
-		self.pc,
             );
-	    instruction_stage = tup.0;
-	    pass = tup.1;
-	    
-	    if instruction_stage == 0 {
+	    if pass.instruction_stage == 0 {
 		self.memory.addr_bus = self.pc;
 		instruction = self.memory.read();
 	    }
@@ -130,6 +124,18 @@ impl Memory {
             _ => (),
         };
     }
+    pub fn pop(&mut self, reg_file: &mut RegFile) -> u8 {
+	self.addr_bus = reg_file.SP;
+	let stack_val = self.read();
+	reg_file.SP = reg_file.SP - 1;
+	stack_val
+    }
+
+    pub fn push(&mut self, reg_file: &mut RegFile, push_reg: Reg8) {
+	reg_file.SP = reg_file.SP - 1;
+	self.addr_bus = reg_file.SP;
+	self.write_data(reg_file[push_reg]);
+    }
 }
 
 impl RegFile {
@@ -165,6 +171,7 @@ impl RegFile {
             Reg16::SP => self.SP,
         }
     }
+    
 }
 
 impl Index<Reg8> for RegFile {
