@@ -1,5 +1,22 @@
 use crate::cpu::{Flags, Memory, Reg16, Reg8, RegFile};
 
+#[derive(Clone, Copy, Default)]
+pub struct StagePassThrough {
+    data: u8,
+    data16: u16,
+    flags: Flags,
+    pub next_pc: u16,
+    pub instruction_stage: u8,
+}
+
+pub enum CC {
+    UC, //not a real condition code, but stands for unconditional
+    NZ,
+    NC,
+    Z,
+    C,
+}
+
 pub fn instruction_decode(
     opcode: u8,
     reg_file: &mut RegFile,
@@ -12,7 +29,21 @@ pub fn instruction_decode(
             pass_to_next_stage.next_pc = passed.next_pc + 1;
             pass_to_next_stage
         } //NOOP
-	n @ (0x02 | 0x12) => ld_16_a(reg_file, mem, n, passed),
+        n @ (0x01 | 0x11 | 0x21 | 0x31) => ld_rr_nn(reg_file, mem, n, passed),
+        n @ (0x02 | 0x12 | 0x22 | 0x32) => ld_16_a(reg_file, mem, n, passed),
+        n @ (0x04 | 0x14 | 0x24 | 0x34 | 0x0C | 0x1C | 0x2C | 0x3C) => {
+            inc(reg_file, mem, passed, n)
+        }
+        n @ (0x03 | 0x13 | 0x23 | 0x33) => inc_rr(reg_file, n, passed),
+        n @ (0x05 | 0x15 | 0x25 | 0x0D | 0x1D | 0x2D | 0x3D) => dec(reg_file, mem, passed, n),
+        n @ (0x0B | 0x1B | 0x2B | 0x3B) => dec_rr(reg_file, n, passed),
+        n @ (0x06 | 0x16 | 0x26 | 0x0E | 0x1E | 0x2E | 0x3E) => ld_r_n(reg_file, mem, n, passed),
+
+        n @ (0x0A | 0x1A) => ld_a_16(reg_file, mem, n, passed),
+	0x07 => rlca(reg_file, passed),
+	0x17 => rla(reg_file, passed),
+	0x0F => rrca(reg_file, passed),
+	0x1F => rra(reg_file, passed),
         0x2F => cpl(reg_file, passed),
         0x3f => ccf(reg_file, passed),
         0x37 => scf(reg_file, passed),
@@ -69,7 +100,7 @@ pub fn instruction_decode(
             let mut pass_to_next_stage = StagePassThrough::default();
             pass_to_next_stage.next_pc = passed.next_pc;
             pass_to_next_stage
-        }, //HALT
+        } //HALT
 
         0x78 => load8(reg_file, Reg8::A, reg_file.B, passed),
         0x79 => load8(reg_file, Reg8::A, reg_file.C, passed),
@@ -86,10 +117,8 @@ pub fn instruction_decode(
         n @ (0xA0..=0xA7) => and(reg_file, mem, passed, n),
         // XOR/OR instructions
         n @ (0xA8..=0xB7) => xor_or(reg_file, mem, passed, n),
-        n @ (0x04 | 0x14 | 0x24 | 0x34 | 0x0C | 0x1C | 0x2C | 0x3C) => {
-            inc(reg_file, mem, passed, n)
-        }
-        n @ (0x05 | 0x15 | 0x25 | 0x0D | 0x1D | 0x2D | 0x3D) => dec(reg_file, mem, passed, n),
+	n @ (0x0C | 0x0D | 0x8C | 0x8D) => ret_cc(reg_file, mem, n, passed),
+	0x9C => ret(reg_file, mem, passed),
         n @ (0xC1 | 0xD1 | 0xE1 | 0xF1) => pop(reg_file, mem, passed, n),
         n @ (0xC5 | 0xD5 | 0xE5 | 0xF5) => push(reg_file, mem, passed, n),
         0xE9 => jp_hl(reg_file),
@@ -98,28 +127,249 @@ pub fn instruction_decode(
     }
 }
 
-fn ld_16_a(reg_file: &RegFile, mem: &mut Memory, n: u8, passed: StagePassThrough) -> StagePassThrough {
+fn jr_cc_e(
+    reg_file: &RegFile,
+    mem: &mut Memory,
+    n: u8,
+    passed: StagePassThrough,
+) -> StagePassThrough {
     let mut pass_to_next_stage = StagePassThrough::default();
     match passed.instruction_stage {
-	0 => {
-	    let reg16 = match n {
-		0x02 => Reg16::BC,
-		0x12 => Reg16::DE,
-		_ => panic!("invalid op"),
-	    };
-	    mem.addr_bus = reg_file.get16(reg16);
-	    mem.write_data(reg_file[Reg8::A]);
-	    pass_to_next_stage.instruction_stage = 1;
-	    pass_to_next_stage.next_pc = passed.next_pc;
-	}
-	1 => {
-	    pass_to_next_stage.next_pc = passed.next_pc + 1;
-	    pass_to_next_stage.instruction_stage = 0;
-	}
-	_ => panic!("ld BC/DE a: invalid instruction stage"),
+        0 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            mem.addr_bus = pass_to_next_stage.next_pc;
+            pass_to_next_stage.data = mem.read();
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            let cc = match n {
+                0x20 => CC::NZ,
+                0x30 => CC::NC,
+                0x18 => CC::UC,
+                0x28 => CC::Z,
+                0x38 => CC::C,
+                _ => panic!("jr_cc_e: invalid opcode"),
+            };
+            if reg_file.check_condition(cc) {
+                pass_to_next_stage.instruction_stage = 2;
+                pass_to_next_stage.data = passed.data;
+            } else {
+                pass_to_next_stage.instruction_stage = 0;
+            }
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+        }
+        2 => {
+            pass_to_next_stage.next_pc = passed.next_pc + passed.data as u16;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("jr_cc_ee: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_rr_nn(
+    reg_file: &mut RegFile,
+    mem: &mut Memory,
+    n: u8,
+    passed: StagePassThrough,
+) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            mem.addr_bus = pass_to_next_stage.next_pc;
+            pass_to_next_stage.data = mem.read();
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            mem.addr_bus = pass_to_next_stage.next_pc;
+            let val = ((mem.read() as u16) << 8) | passed.data as u16;
+            let reg16 = match n {
+                0x01 => Reg16::BC,
+                0x11 => Reg16::DE,
+                0x21 => Reg16::HL,
+                0x31 => Reg16::SP,
+                _ => panic!("ld_rr_nn: invalid opcode"),
+            };
+            reg_file.set16(reg16, val);
+            pass_to_next_stage.instruction_stage = 2;
+        }
+        2 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("ld_rr_nn: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_16_a(
+    reg_file: &mut RegFile,
+    mem: &mut Memory,
+    n: u8,
+    passed: StagePassThrough,
+) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            let reg16 = match n {
+                0x02 => Reg16::BC,
+                0x12 => Reg16::DE,
+                0x22 => Reg16::HL,
+                0x32 => Reg16::HL,
+                _ => panic!("invalid op"),
+            };
+            mem.addr_bus = reg_file.get16(reg16);
+            mem.write_data(reg_file[Reg8::A]);
+            pass_to_next_stage.instruction_stage = 1;
+            pass_to_next_stage.next_pc = passed.next_pc;
+        }
+        1 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 0;
+            if n == 0x22 {
+                reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) + 1)
+            } else if n == 0x32 {
+                reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) - 1)
+            }
+        }
+        _ => panic!("ld BC/DE a: invalid instruction stage"),
     };
     pass_to_next_stage
 }
+
+fn ld_a_16(
+    reg_file: &mut RegFile,
+    mem: &mut Memory,
+    n: u8,
+    passed: StagePassThrough,
+) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            let reg16 = match n {
+                0x0A => Reg16::BC,
+                0x1A => Reg16::DE,
+                0x2A | 0x3A => Reg16::HL,
+                _ => panic!("invalid opcode"),
+            };
+            mem.addr_bus = reg_file.get16(reg16);
+            reg_file[Reg8::A] = mem.read();
+            pass_to_next_stage.instruction_stage = 1;
+            pass_to_next_stage.next_pc = passed.next_pc;
+        }
+        1 => {
+            pass_to_next_stage.instruction_stage = 0;
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+
+            if n == 0x2A {
+                reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) + 1)
+            } else if n == 0x3A {
+                reg_file.set16(Reg16::HL, reg_file.get16(Reg16::HL) - 1)
+            }
+        }
+        _ => panic!("ld_a_16: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_r_n(
+    reg_file: &mut RegFile,
+    mem: &mut Memory,
+    n: u8,
+    passed: StagePassThrough,
+) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            mem.addr_bus = passed.next_pc + 1;
+            pass_to_next_stage.data = mem.read();
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            let reg8 = match n {
+                0x06 => Reg8::B,
+                0x16 => Reg8::D,
+                0x26 => Reg8::H,
+                0x0E => Reg8::C,
+                0x1E => Reg8::E,
+                0x2E => Reg8::L,
+                0x3E => Reg8::A,
+                _ => panic!("ld_r_n: invalid opcode"),
+            };
+            reg_file[reg8] = passed.data;
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("ld_r_n: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_hl_n(reg_file: &mut RegFile, mem: &mut Memory, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            mem.addr_bus = passed.next_pc + 1;
+            pass_to_next_stage.data = mem.read();
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            mem.addr_bus = reg_file.get16(Reg16::HL);
+            mem.write_data(passed.data);
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 2;
+        }
+        2 => {
+            pass_to_next_stage.next_pc = passed.next_pc;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("ld_hl_n: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn rlca(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThrough {
+    reg_file.flags.C = reg_file[Reg8::A] >> 7;
+    reg_file[Reg8::A] = reg_file[Reg8::A].rotate_left(1);
+    StagePassThrough {
+        next_pc: passed.next_pc + 1,
+        ..Default::default()
+    }
+}
+
+fn rrca(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThrough {
+    reg_file.flags.C = reg_file[Reg8::A] & 1;
+    reg_file[Reg8::A] = reg_file[Reg8::A].rotate_right(1);
+    StagePassThrough {
+        next_pc: passed.next_pc + 1,
+        ..Default::default()
+    }
+}
+
+fn rla(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThrough {
+    let carry = reg_file.flags.C;
+    reg_file.flags.C = reg_file[Reg8::A] >> 7;
+    reg_file[Reg8::A] = (reg_file[Reg8::A] << 1) | carry;
+    StagePassThrough {
+        next_pc: passed.next_pc + 1,
+        ..Default::default()
+    }
+}
+
+fn rra(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThrough {
+    let carry = reg_file.flags.C;
+    reg_file.flags.C = reg_file[Reg8::A] & 1;
+    reg_file[Reg8::A] = (reg_file[Reg8::A] >> 1) | (carry << 7);
+    StagePassThrough {
+        next_pc: passed.next_pc + 1,
+        ..Default::default()
+    }
+}
+
 fn cpl(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThrough {
     let pass_to_next_stage = load8(reg_file, Reg8::A, !reg_file.A, passed);
     reg_file.flags.N = 1;
@@ -211,7 +461,7 @@ fn add_adc(
             } else {
                 load8(reg_file, Reg8::A, val, passed);
                 reg_file.flags = flags;
-                pass_to_next_stage.next_pc + passed.next_pc + 1;
+                pass_to_next_stage.next_pc = passed.next_pc + 1;
             }
         }
         1 => {
@@ -264,7 +514,7 @@ fn sub_sbc_cp(
                 (0x90..=0x9F) => {
                     load8(reg_file, Reg8::A, val as u8, passed);
                     reg_file.flags = flags;
-                    pass_to_next_stage.next_pc + passed.next_pc + 1;
+                    pass_to_next_stage.next_pc = passed.next_pc + 1;
                 }
                 _ => (),
             }
@@ -320,7 +570,7 @@ fn xor_or(
             } else {
                 load8(reg_file, Reg8::A, val, passed);
                 reg_file.flags = flags;
-                pass_to_next_stage.next_pc + passed.next_pc + 1;
+                pass_to_next_stage.next_pc = passed.next_pc + 1;
             }
         }
         1 => {
@@ -367,7 +617,7 @@ fn and(
             } else {
                 load8(reg_file, Reg8::A, val, passed);
                 reg_file.flags = flags;
-                pass_to_next_stage.next_pc + passed.next_pc + 1;
+                pass_to_next_stage.next_pc = passed.next_pc + 1;
             }
         }
         1 => {
@@ -444,6 +694,38 @@ fn inc(
     pass_to_next_stage
 }
 
+fn inc_rr(reg_file: &mut RegFile, n: u8, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            let reg16 = match n {
+                0x03 => Reg16::BC,
+                0x13 => Reg16::DE,
+                0x23 => Reg16::HL,
+                0x33 => Reg16::SP,
+                _ => panic!("inc16: invalid opcode"),
+            };
+            pass_to_next_stage.data16 = reg_file.get16(reg16);
+            pass_to_next_stage.next_pc = passed.next_pc;
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            let reg16 = match n {
+                0x03 => Reg16::BC,
+                0x13 => Reg16::DE,
+                0x23 => Reg16::HL,
+                0x33 => Reg16::SP,
+                _ => panic!("inc16: invalid opcode"),
+            };
+            reg_file.set16(reg16, passed.data16 + 1);
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("inc16: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
 fn dec(
     reg_file: &mut RegFile,
     mem: &mut Memory,
@@ -504,6 +786,38 @@ fn dec(
             pass_to_next_stage.next_pc = passed.next_pc + 1;
         }
         _ => (),
+    }
+    pass_to_next_stage
+}
+
+fn dec_rr(reg_file: &mut RegFile, n: u8, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            let reg16 = match n {
+                0x0B => Reg16::BC,
+                0x1B => Reg16::DE,
+                0x2B => Reg16::HL,
+                0x3B => Reg16::SP,
+                _ => panic!("inc16: invalid opcode"),
+            };
+            pass_to_next_stage.data16 = reg_file.get16(reg16);
+            pass_to_next_stage.next_pc = passed.next_pc;
+            pass_to_next_stage.instruction_stage = 1;
+        }
+        1 => {
+            let reg16 = match n {
+                0x0B => Reg16::BC,
+                0x1B => Reg16::DE,
+                0x2B => Reg16::HL,
+                0x3B => Reg16::SP,
+                _ => panic!("inc16: invalid opcode"),
+            };
+            reg_file.set16(reg16, passed.data16 - 1);
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.instruction_stage = 0;
+        }
+        _ => panic!("inc16: invalid instruction stage"),
     }
     pass_to_next_stage
 }
@@ -612,7 +926,7 @@ fn ld_sp_hl(reg_file: &mut RegFile, passed: StagePassThrough) -> StagePassThroug
         1 => {
             reg_file.set16(Reg16::SP, passed.data16);
             pass_to_next_stage.instruction_stage = 0;
-	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+            pass_to_next_stage.next_pc = passed.next_pc + 1;
         }
         _ => panic!("LD SP, HL: invalid instruction stage"),
     }
@@ -706,13 +1020,75 @@ fn or(a: u8, b: u8) -> (u8, Flags) {
     (val, flags)
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct StagePassThrough {
-    data: u8,
-    data16: u16,
-    flags: Flags,
-    pub next_pc: u16,
-    pub instruction_stage: u8,
+fn ret(reg_file: &RegFile, mem: &mut Memory, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+	0 => {
+	    pass_to_next_stage.data = mem.pop(reg_file);
+	    pass_to_next_stage.instruction_stage = 1;
+	    pass_to_next_stage.next_pc = passed.next_pc;
+	}
+	1 => {
+	    pass_to_next_stage.data16 = (mem.pop(reg_file) << 8) as u16 | passed.data as u16;
+	    pass_to_next_stage.instruction_stage = 2;
+	    pass_to_next_stage.next_pc = passed.next_pc;
+	}
+	2 => {
+	    pass_to_next_stage.data16 = passed.data16;
+	    pass_to_next_stage.instruction_stage = 3;
+	    pass_to_next_stage.next_pc = passed.next_pc;
+	}
+	3 => {
+	    pass_to_next_stage.next_pc = passed.data16;
+	    pass_to_next_stage.instruction_stage = 0;
+	}
+	_ => panic!("ret: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ret_cc(reg_file: &RegFile, mem: &mut Memory, n: u8, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    let cc = match n {
+	0x0C => CC::NZ,
+	0x0D => CC::NC,
+	0x8C => CC::Z,
+	0x8D => CC::C,
+	_ => panic!("ret_cc: invalid op code"),
+    };
+    match passed.instruction_stage {
+	0 => {
+	    if reg_file.check_condition(cc) {
+		pass_to_next_stage.data = mem.pop(reg_file);
+		pass_to_next_stage.instruction_stage = 1;
+		pass_to_next_stage.next_pc = passed.next_pc;
+	    } else {
+		pass_to_next_stage.instruction_stage = 1;
+		pass_to_next_stage.next_pc = passed.next_pc;
+	    }
+	}
+	1 => {
+	    if reg_file.check_condition(cc) {
+		pass_to_next_stage.data16 = (mem.pop(reg_file) << 8) as u16 | passed.data as u16;
+		pass_to_next_stage.instruction_stage = 2;
+		pass_to_next_stage.next_pc = passed.next_pc;
+	    } else {
+		pass_to_next_stage.instruction_stage = 0;
+		pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    }
+	}
+	2 => {
+	    pass_to_next_stage.data16 = passed.data16;
+	    pass_to_next_stage.instruction_stage = 3;
+	    pass_to_next_stage.next_pc = passed.next_pc;
+	}
+	3 => {
+	    pass_to_next_stage.next_pc = passed.data16;
+	    pass_to_next_stage.instruction_stage = 0;
+	}
+	_ => panic!("ret: invalid instruction stage"),
+    }
+    pass_to_next_stage
 }
 
 fn load8(

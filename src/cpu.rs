@@ -1,4 +1,4 @@
-use crate::instructions::{instruction_decode, StagePassThrough};
+use crate::instructions::{instruction_decode, StagePassThrough, CC};
 use std::ops::{Index, IndexMut};
 
 pub struct CPU {
@@ -11,19 +11,14 @@ impl CPU {
     pub fn execute(&mut self) {
         let mut instruction: u8 = 0x0000;
         let mut pass = StagePassThrough::default();
-	pass.next_pc = self.pc + 1;
+        pass.next_pc = self.pc + 1;
         loop {
-            let pass = instruction_decode(
-                instruction,
-                &mut self.reg_file,
-                &mut self.memory,
-                pass,
-            );
-	    if pass.instruction_stage == 0 {
-		self.memory.addr_bus = self.pc;
-		instruction = self.memory.read();
-	    }
-	    self.pc = pass.next_pc;
+            let pass = instruction_decode(instruction, &mut self.reg_file, &mut self.memory, pass);
+            if pass.instruction_stage == 0 {
+                self.memory.addr_bus = self.pc;
+                instruction = self.memory.read();
+            }
+            self.pc = pass.next_pc;
         }
     }
 }
@@ -73,11 +68,9 @@ pub struct RegFile {
 
 pub struct Memory {
     pub addr_bus: u16,
-    boot_rom: [u8; 0x00FF],        // 0x0000 - 0x00FF
-    game_rom_bank0: [u8; 0x3FFF],  // 0x0000 - 0x3FFF
-    game_rom_bankn: [u8; 0x3FFF],  // 0x4000 - 0x7FFF
-    tile_ram: [u8; 0x17FF],        // 0x8000 - 0x97FF
-    background_map: [u8; 0x07FF],  // 0x9800 - 0x9FFF
+    rom_bank0: [u8; 0x00FF],       // 0x0000 - 0x00FF
+    rom_bank1: [u8; 0x3FFF],       // 0x0000 - 0x3FFF
+    vram: [u8; 0x1FFF],            // 0x8000 - 0x9FFF
     cartridge_ram: [u8; 0x1FFF],   // 0xA000 - 0xBFFF
     working_ram: [u8; 0x1FFF],     // 0xC000 - 0xDFFF
     echo_ram: [u8; 0x1DFF],        // 0xE000 - 0xFDFF
@@ -91,10 +84,9 @@ impl Memory {
     pub fn read(&self) -> u8 {
         let addr = self.addr_bus as usize;
         match addr {
-            0x0000..=0x3FFF => self.boot_rom[addr],
-            0x4000..=0x7FFF => self.game_rom_bank0[addr - 0x4000],
-            0x8000..=0x97FF => self.game_rom_bankn[addr - 0x8000],
-            0x9800..=0x9FFF => self.tile_ram[addr - 0x9800],
+            0x0000..=0x3FFF => self.rom_bank0[addr],
+            0x4000..=0x7FFF => self.rom_bank1[addr - 0x4000],
+            0x8000..=0x9FFF => self.vram[addr - 0x8000],
             0xA000..=0xBFFF => self.cartridge_ram[addr - 0xA000],
             0xC000..=0xDFFF => self.working_ram[addr - 0xC000],
             0xE000..=0xFDFF => self.echo_ram[addr - 0xE000],
@@ -109,10 +101,9 @@ impl Memory {
     pub fn write_data(&mut self, data: u8) {
         let addr = self.addr_bus as usize;
         match addr {
-            0x0000..=0x3FFF => self.boot_rom[addr] = data,
-            0x4000..=0x7FFF => self.game_rom_bank0[addr - 0x4000] = data,
-            0x8000..=0x97FF => self.game_rom_bankn[addr - 0x8000] = data,
-            0x9800..=0x9FFF => self.tile_ram[addr - 0x9800] = data,
+            0x0000..=0x3FFF => self.rom_bank0[addr] = data,
+            0x4000..=0x7FFF => self.rom_bank1[addr - 0x4000] = data,
+            0x8000..=0x9FFF => self.vram[addr - 0x8000] = data,
             0xA000..=0xBFFF => self.cartridge_ram[addr - 0xA000] = data,
             0xC000..=0xDFFF => self.working_ram[addr - 0xC000] = data,
             0xE000..=0xFDFF => self.echo_ram[addr - 0xE000] = data,
@@ -125,16 +116,16 @@ impl Memory {
         };
     }
     pub fn pop(&mut self, reg_file: &mut RegFile) -> u8 {
-	self.addr_bus = reg_file.SP;
-	let stack_val = self.read();
-	reg_file.SP = reg_file.SP - 1;
-	stack_val
+        self.addr_bus = reg_file.SP;
+        let stack_val = self.read();
+        reg_file.SP = reg_file.SP + 1;
+        stack_val
     }
 
     pub fn push(&mut self, reg_file: &mut RegFile, push_reg: Reg8) {
-	reg_file.SP = reg_file.SP - 1;
-	self.addr_bus = reg_file.SP;
-	self.write_data(reg_file[push_reg]);
+        reg_file.SP = reg_file.SP - 1;
+        self.addr_bus = reg_file.SP;
+        self.write_data(reg_file[push_reg]);
     }
 }
 
@@ -171,7 +162,16 @@ impl RegFile {
             Reg16::SP => self.SP,
         }
     }
-    
+
+    pub fn check_condition(&self, cc: CC) -> bool {
+	match cc {
+	    CC::NZ => self.flags.Z == 0,
+	    CC::Z => self.flags.Z == 1,
+	    CC::C => self.flags.C == 1,
+	    CC::NC => self.flags.C == 0,
+	    CC::UC => true,
+	}
+    }
 }
 
 impl Index<Reg8> for RegFile {
