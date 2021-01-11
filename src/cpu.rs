@@ -127,6 +127,12 @@ impl Memory {
         self.addr_bus = reg_file.SP;
         self.write_data(reg_file[push_reg]);
     }
+
+    pub fn push_val(&mut self, reg_file: &mut RegFile, val: u8) {
+	reg_file.SP = reg_file.SP - 1;
+	self.addr_bus = reg_file.SP;
+	self.write_data(val);
+    }
 }
 
 impl RegFile {
