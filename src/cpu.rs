@@ -23,6 +23,7 @@ impl CPU {
     }
 }
 
+#[derive(Copy, Clone)]
 pub enum Reg8 {
     A,
     B,
@@ -34,6 +35,7 @@ pub enum Reg8 {
     L,
 }
 
+#[derive(Copy, Clone)]
 pub enum Reg16 {
     AF,
     BC,
