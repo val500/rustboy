@@ -1,5 +1,6 @@
 # Rustboy
 ## Gameboy Emulator Written in Rust
+* Mainly meant to learn more about old architectures and as a fun learning project to get better as Rust.
 ## Progress
 ### 1/10/21
 * Most of the main opcodes have been added
