@@ -1,5 +1,8 @@
 use crate::instructions::{instruction_decode, StagePassThrough, CC};
 use std::ops::{Index, IndexMut};
+use std::sync::mpsc::channel;
+use std::thread;
+use std::time::Duration;
 
 pub struct CPU {
     reg_file: RegFile,
@@ -12,7 +15,14 @@ impl CPU {
         let mut instruction: u8 = 0x0000;
         let mut pass = StagePassThrough::default();
         pass.next_pc = self.pc + 1;
+        let (clock_tx, clock_rx) = channel();
+        // Tick every 953 nanoseconds (every 4 machine cycles)
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_nanos(953));
+            clock_tx.send(0).unwrap();
+        });
         loop {
+            clock_rx.recv();
             let pass = instruction_decode(instruction, &mut self.reg_file, &mut self.memory, pass);
             if pass.instruction_stage == 0 {
                 self.memory.addr_bus = self.pc;
@@ -131,9 +141,66 @@ impl Memory {
     }
 
     pub fn push_val(&mut self, reg_file: &mut RegFile, val: u8) {
-	reg_file.SP = reg_file.SP - 1;
-	self.addr_bus = reg_file.SP;
-	self.write_data(val);
+        reg_file.SP = reg_file.SP - 1;
+        self.addr_bus = reg_file.SP;
+        self.write_data(val);
+    }
+
+    pub fn read_lcdc(&self) -> u8 {
+        self.io_registers[0xFF41 - 0xFF00]
+    }
+
+    pub fn get_tile_bg(&self, tile_index: u8) -> u16 {
+        let lcdc = self.read_lcdc();
+        let offset: u16 = if lcdc & 8 == 0 { 0x1800 } else { 0x1C00 };
+        let base = (tile_index as u16 + offset) as usize;
+	(self.vram[base] << 8) as u16 | (self.vram[base + 1]) as u16
+    }
+
+    pub fn get_tile_window(&self, tile_index: u8) -> u16 {
+        let lcdc = self.read_lcdc();
+        let offset: u16 = if lcdc & 0x40 == 0 { 0x1800 } else { 0x1C00 };
+        let base = (tile_index as u16 + offset) as usize;
+        (self.vram[base] << 8) as u16 | (self.vram[base + 1]) as u16
+    }
+
+    fn get_tile_8000(&self, tile_index: u8) -> u16 {
+	let base = (tile_index * 2) as usize;
+	((self.vram[base] << 8) as u16) | (self.vram[base + 1] as u16)
+    }
+
+    fn get_tile_8800(&self, tile_index: i8) -> u16 {
+	let base = (0x1000 + (tile_index * 2) as i16) as usize;
+	((self.vram[base] << 8) as u16) | (self.vram[base + 1] as u16)
+    }
+
+    pub fn get_tile(&self, tile_index: u8) -> u16 {
+	let lcdc = self.read_lcdc();
+        if lcdc & 0x10 == 0 {
+	    self.get_tile_8800(tile_index as i8)
+	} else {
+	    self.get_tile_8000(tile_index)
+	}
+    }
+    
+    pub fn get_background(&self) -> Vec<u16> {
+	let scroll_y = self.io_registers[0x42];
+	let scroll_x = self.io_registers[0x43];
+	let window_y = self.io_registers[0x4A];
+	let window_x = self.io_registers[0x4B];
+
+	let lcdc = self.read_lcdc();
+        let offset: u16 = if lcdc & 8 == 0 { 0x1800 } else { 0x1C00 };
+	let start_index = ((scroll_y * 20) + scroll_x) * 2;
+	let mut background: Vec<u16> = Vec::with_capacity(360);
+	for y in 0..18 {
+	    for x in 0..20 {
+		let index = start_index as u16 + offset + (y * 20 * 2) + (x * 2) as u16;
+		let tile_index = self.vram[index as usize];
+		background.push(self.get_tile(tile_index));
+	    };
+	};
+	background
     }
 }
 
@@ -172,13 +239,13 @@ impl RegFile {
     }
 
     pub fn check_condition(&self, cc: CC) -> bool {
-	match cc {
-	    CC::NZ => self.flags.Z == 0,
-	    CC::Z => self.flags.Z == 1,
-	    CC::C => self.flags.C == 1,
-	    CC::NC => self.flags.C == 0,
-	    CC::UC => true,
-	}
+        match cc {
+            CC::NZ => self.flags.Z == 0,
+            CC::Z => self.flags.Z == 1,
+            CC::C => self.flags.C == 1,
+            CC::NC => self.flags.C == 0,
+            CC::UC => true,
+        }
     }
 }
 
