@@ -2,6 +2,17 @@
 ## Gameboy Emulator Written in Rust
 * I am mainly making this to learn more about old architectures and as a fun learning project to get better as Rust. Not neccessarily the most accurate/correct emulation of the GameBoy.
 ## Progress
+### 1/11/21
+* Instructions have been "finished", still need to be tested
+* I started adding graphics logic
+  * Right now it can fetch tiles from memory which I represent as a u16, and creates the background as a vector of u16.
+* Remaining Tasks:
+  * Actually render the background
+  * Overlay the window on top of the background
+  * Render the Sprites from OAM
+  * Interrupt Logic
+  * TESTING
+
 ### 1/10/21
 * Most of the main opcodes have been added
 * Just the EI/DI and the remaining CB opcodes are left
