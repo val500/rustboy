@@ -31,38 +31,148 @@ impl Into<Color> for GameboyColor {
     }
 }
 
-pub fn ppu_execute(ppu_lock: Arc<RwLock<PPU>>, clock_rx: Receiver<u8>) {
-    let (ppu_clk_send, ppu_clk_recv) = channel();
-    thread::spawn(move || loop {
-        for _ in 0..80 {
-            clock_rx.recv().unwrap();
-        }
-        ppu_clk_send.send(0).unwrap();
-        for _ in 0..172 {
-            clock_rx.recv().unwrap();
-        }
-        ppu_clk_send.send(0).unwrap();
-        for _ in 0..204 {
-            clock_rx.recv().unwrap();
-        }
-        ppu_clk_send.send(0).unwrap();
-    });
+pub fn ppu_execute(ppu_lock: Arc<RwLock<PPU>>, barrier: Arc<Barrier>) {
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+    let window = video_subsystem.window("Gameboy Window", 160, 144).build().unwrap();
+    let mut canvas : Canvas<Window> = window.into_canvas()
+	.present_vsync() 
+	.build().unwrap();
+    
+    loop {
+	let lcdc = {
+	    ppu_lock.read().unwrap().io_registers[0x40]
+	};
 
-    
-    
+	if lcdc >> 7 != 1 {
+	    PPU::clear_canvas(&mut canvas);
+	} else {
+	    for scanline in 0..144 {
+		let pixel_row;
+		{
+		    let ppu = ppu_lock.read().unwrap();
+		    let sprites = ppu.object_search(scanline);
+		    barrier.wait();
+		    pixel_row = ppu.draw(scanline, sprites);
+		}
+		barrier.wait();
+		PPU::update_canvas(&mut canvas, pixel_row, scanline);
+		barrier.wait();
+	    }
+	}
+	barrier.wait();
+    }
 }
 
+#[derive(Copy, Clone)]
+pub struct OamEntry {
+    y_coord: u8,
+    x_coord: u8,
+    data_tile_num: u8,
+    sprite_priority: bool,
+    y_flip: bool,
+    x_flip: bool,
+    palette: bool,
+}
+
+#[derive(Clone, Copy)]
 pub struct PPU {
-    pub vram: [u8; 0x1FFF],
-    pub oam: [u8; 0x009F],
-    pixel_fifo: Queue<GameboyColor>,
-    screen: [[GameboyColor; 144]; 160],
+    pub vram: [u8; 0x2000],
+    pub oam: [u8; 0x00A0],
+    pub io_registers: [u8; 0x0080],
 }
 
 impl PPU {
-    fn update_canvas(&self, canvas: &mut Canvas<Window>) {
-        canvas.set_draw_color(GameboyColor::White);
-        canvas.clear();
+    pub fn new(io_registers: [u8; 0x0080]) -> PPU {
+	PPU {
+	    vram: [0; 0x2000],
+	    oam: [0; 0x00A0],
+	    io_registers,
+	}
+    }
+
+    
+    pub fn object_search(&self, scanline: u8) -> Vec<OamEntry> {
+        let mut oam_vec: Vec<OamEntry> = Vec::new();
+	let use_16;
+	{
+	    use_16 = check_bit(self.io_registers[0x40], 2);
+	}
+        for s in 0..40 {
+	    let i = 4 * s;
+            oam_vec.push(OamEntry {
+                y_coord: self.oam[i],
+                x_coord: self.oam[i + 1],
+                data_tile_num: self.oam[i + 2],
+                sprite_priority: !(self.oam[i + 3] & 8 == 0),
+                y_flip: !(self.oam[i + 3] & 4 == 0),
+                x_flip: !(self.oam[i + 3] & 2 == 0),
+                palette: !(self.oam[i + 3] & 1 == 0),
+            });
+        }
+	let offset = if use_16 { 16 } else { 8 };
+        oam_vec = oam_vec
+            .into_iter()
+            .filter(|oam_entry| {
+		(oam_entry.y_coord as u16) >= scanline as u16 + 16
+		    && (oam_entry.y_coord as u16) < scanline as u16 + 16 + offset
+            })
+            .collect::<Vec<OamEntry>>();
+        oam_vec.sort_by_key(|o| o.x_coord);
+	oam_vec
+    }
+
+    pub fn draw(&self, scanline: u8, sprites: Vec<OamEntry>) -> Vec<GameboyColor> {
+	let lcdc = self.io_registers[0x40];
+	let palette = self.vram[0x47];
+	let mut color_line: Vec<GameboyColor> = Vec::new();
+	for tile_x in 0..20 {
+            let tile_index = self.get_tile(tile_x, scanline);
+            let tile_low = self.get_tile_data_low(tile_index, scanline);
+            let tile_high = self.get_tile_data_high(tile_index, scanline);
+
+	    color_line.push(PPU::get_color(tile_high >> 6, palette));
+	    color_line.push(PPU::get_color((tile_high & 0x30) >> 6, palette));
+	    color_line.push(PPU::get_color((tile_high & 0x0C) >> 6, palette));
+	    color_line.push(PPU::get_color((tile_high & 0x03) >> 6, palette));
+	    color_line.push(PPU::get_color(tile_low >> 6, palette));
+	    color_line.push(PPU::get_color((tile_low & 0x30) >> 6, palette));
+	    color_line.push(PPU::get_color((tile_low & 0x0C) >> 6, palette));
+	    color_line.push(PPU::get_color((tile_low & 0x03) >> 6, palette));
+	}
+	
+	for sprite in sprites {
+	    let tile_height = if check_bit(lcdc, 2) { 16 } else { 8 };
+	    let tile_row = if sprite.y_flip { tile_height - (scanline - sprite.y_coord) } else { scanline - sprite.y_coord };
+	    let tile_low = self.vram[(sprite.data_tile_num * 16 + 2 * tile_row) as usize];
+	    let tile_high = self.vram[(sprite.data_tile_num * 16 + 2 * tile_row) as usize];
+	    let sprite_palette = if sprite.palette { self.io_registers[0x49] } else { self.io_registers[0x48] };
+	    let mut sprite_row: Vec<GameboyColor> = Vec::new();
+
+	    sprite_row.push(PPU::get_color(tile_high >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_high & 0x30) >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_high & 0x0C) >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_high & 0x03) >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color(tile_low >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_low & 0x30) >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_low & 0x0C) >> 6, sprite_palette));
+	    sprite_row.push(PPU::get_color((tile_low & 0x03) >> 6, sprite_palette));
+
+	    if sprite.x_flip { sprite_row.reverse() };
+
+	    for i in 0..8 {
+		if sprite.x_coord as i16 - 8 + i as i16 >= 160 || (sprite.x_coord as i16 - 8 + i as i16) < 0 {
+		    continue;
+		}
+		if sprite.sprite_priority || color_line[(sprite.x_coord + i) as usize] == GameboyColor::White {
+		    color_line[(sprite.x_coord + i) as usize] = sprite_row[i as usize];
+		}
+	    }
+	}
+	color_line
+    }
+
+    pub fn update_canvas(canvas: &mut Canvas<Window>, color_row: Vec<GameboyColor>, scanline: u8) {
         for x in 0..160 {
             for y in 0..144 {
                 canvas.set_draw_color(self.screen[x][y]);
@@ -72,40 +182,26 @@ impl PPU {
         canvas.present();
     }
 
-    
-
-    fn pixel_fetcher(&mut self, tile_x: u8, cur_scanline: u8, io_registers: &[u8; 0x007F]) {
-        let palette = self.vram[0x47];
-        let tile_index = self.get_tile(tile_x, cur_scanline, io_registers);
-        let tile_low = self.get_tile_data_low(tile_index, cur_scanline, io_registers);
-        let tile_high = self.get_tile_data_high(tile_index, cur_scanline, io_registers);
-
-        self.pixel_fifo
-            .queue(PPU::get_color(tile_high >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_high & 0x30) >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_high & 0x0C) >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_high & 0x03) >> 6, palette));
-
-        self.pixel_fifo
-            .queue(PPU::get_color(tile_low >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_low & 0x30) >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_low & 0x0C) >> 6, palette));
-        self.pixel_fifo
-            .queue(PPU::get_color((tile_low & 0x03) >> 6, palette));
+    pub fn clear_canvas(canvas: &mut Canvas<Window>) {
+	canvas.set_draw_color(GameboyColor::White);
+        canvas.clear();
+	canvas.present();
     }
 
-    fn get_tile(&self, tile_x: u8, cur_scanline: u8, io_registers: &[u8; 0x007F]) -> u8 {
-        let lcdc = io_registers[0x41];
-        let window_y = io_registers[0x4A];
-        let window_x = io_registers[0x4B];
-        let scroll_y = io_registers[0x42];
-        let scroll_x = io_registers[0x43];
-        let use_window = cur_scanline >= window_y && tile_x * 8 >= window_x - 7;
+    fn get_tile(&self, tile_x: u8, cur_scanline: u8) -> u8 {
+	let lcdc: u8;
+	let window_y: i16;
+	let window_x: i16;
+	let scroll_y: i16;
+	let scroll_x: i16;
+	{
+            lcdc = self.io_registers[0x40];
+            window_y = self.io_registers[0x4A] as i16;
+            window_x = self.io_registers[0x4B] as i16;
+            scroll_y = self.io_registers[0x42] as i16;
+            scroll_x = self.io_registers[0x43] as i16;
+	}
+        let use_window = cur_scanline as i16 >= window_y && tile_x as i16 * 8 >= window_x - 7;
 
         let fetcher_y = if use_window {
             cur_scanline - window_y
@@ -142,7 +238,11 @@ impl PPU {
         cur_scanline: u8,
         io_registers: &[u8; 0x007F],
     ) -> u8 {
-        let lcdc = io_registers[0x41];
+	
+	let lcdc;
+        {
+	    lcdc = self.io_registers[0x40];
+	}
         let tile_row = (cur_scanline % 8) as u16;
         if lcdc & 0x10 == 0 {
             let base = 0x1000 + (tile_index as i8 * 2) as i16;
@@ -161,7 +261,10 @@ impl PPU {
         io_registers: &[u8; 0x007F],
     ) -> u8 {
         let tile_row = (cur_scanline % 8) as u16;
-        let lcdc = io_registers[0x41];
+        let lcdc;
+	{
+	    lcdc = self.io_registers[0x40];
+	}
         if lcdc & 0x10 == 0 {
             let base = 0x1000 + (tile_index as i8 * 2) as i16;
             self.vram[(base.unsigned_abs() + 1 + 2 * tile_row) as usize]
@@ -187,4 +290,18 @@ impl PPU {
             _ => panic!("invalid color id"),
         }
     }
+}
+
+fn check_bit(num: u8, bit_num: u8) -> bool {
+    !(num & (1 << bit_num) == 0)
+}
+
+
+#[derive(Copy, Clone)]
+pub enum Mode {
+    Mode0,
+    Mode1,
+    Mode2,
+    Mode3,
+    Off,
 }

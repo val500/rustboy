@@ -13,52 +13,55 @@ type Tile = [u16; 8];
 pub struct CPU {
     pub reg_file: RegFile,
     pub addr_bus: u16,
-    memory: Memory,
-    pc: u16,
-    ppu: Arc<RwLock<PPU>>,
-    io_registers: [u8; 0x007F],    // 0xFF00 - 0xFF7F
+    pub memory: Memory,
+    pub pc: u16,
+    pub ppu: PPU,
     ime: bool,
     interrupt_enable_register: u8, // 0xFFFF
+    pub mode: Mode,
 }
 
 impl CPU {
-    pub fn execute(&mut self) {
-        let mut instruction: u8 = 0x0000;
-        let mut pass = StagePassThrough::default();
-        pass.next_pc = self.pc + 1;
-        let (clock_tx, clock_rx) = channel();
-	let (clock_tx_2, clock_rx_2) = channel();
-	let mut ei = false;
-	let mut di = false;
-        // Tick every 953 nanoseconds (every 4 machine cycles)
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_nanos(953));
-            clock_tx.send(0).unwrap();
-	    clock_tx_2.send(0).unwrap();
-        });
-	
-	let ppu_clone = self.ppu.clone();
-	thread::spawn(move || {
-	    ppu_execute(ppu_clone, clock_rx_2);
-	});
-	
-        loop {
-            clock_rx.recv();
-            let pass = instruction_decode(instruction, self, pass);
+    pub fn new(ppu: PPU) -> CPU {
+        CPU {
+            reg_file: RegFile::default(),
+            addr_bus: 0,
+            memory: Memory::default(),
+            pc: 0,
+            ppu,
+            ime: true,
+            interrupt_enable_register: 0,
+            mode: Mode::Off,
+        }
+    }
+
+    pub fn execute_n_cycles(&mut self, debug: bool, n: u16, pass_in: (u8, StagePassThrough)) -> (u8, StagePassThrough) {
+	self.addr_bus = self.pc;
+        let mut instruction = pass_in.0;
+	let mut pass = pass_in.1;
+	for _ in 0..n {
+	    pass = instruction_decode(instruction, self, pass);
+            self.pc = pass.next_pc;
             if pass.instruction_stage == 0 {
                 self.memory.addr_bus = self.pc;
                 instruction = self.read();
-		if ei {
-		    self.ime = true;
-		    ei = false;
-		} else if di {
-		    self.ime = false;
-		    di = false;
-		}
+                if pass.ei {
+                    self.ime = true;
+                    pass.ei = false;
+                } else if pass.di {
+                    self.ime = false;
+                    pass.di = false;
+                }
             }
-	    ei = pass.ei;
-	    di = pass.di;
-            self.pc = pass.next_pc;
+	}
+	(instruction, pass)
+    }
+    fn update_canvas(canvas: &mut Canvas<Window>, color_row: Vec<GameboyColor>, scanline: u8) {
+        canvas.set_draw_color(GameboyColor::White);
+        canvas.clear();
+        for x in 0..160 {
+            canvas.set_draw_color(color_row[x]);
+            canvas.draw_point((x as i32, scanline as i32)).unwrap();
         }
     }
 
@@ -67,13 +70,19 @@ impl CPU {
         match addr {
             0x0000..=0x3FFF => self.memory.rom_bank0[addr],
             0x4000..=0x7FFF => self.memory.rom_bank1[addr - 0x4000],
-            0x8000..=0x9FFF => self.ppu.try_read().map_or_else(|_| 0xFF, |ppu| ppu.vram[addr - 0x8000]),
+            0x8000..=0x9FFF => match self.mode {
+		Mode::Mode3 => 0xFF,
+		_ => self.ppu.vram[addr - 0x8000],
+	    },
             0xA000..=0xBFFF => self.memory.cartridge_ram[addr - 0xA000],
             0xC000..=0xDFFF => self.memory.working_ram[addr - 0xC000],
             0xE000..=0xFDFF => self.memory.echo_ram[addr - 0xE000],
-            0xFE00..=0xFE9F => self.ppu.try_read().map_or_else(|_| 0xFF, |ppu| ppu.oam[addr - 0xFE00]),
+            0xFE00..=0xFE9F => match self.mode {
+		Mode::Off | Mode::Mode0 | Mode::Mode1 => self.ppu.oam[addr - 0xFE00],
+		_ => 0xFF,
+	    }
             0xFEA0..=0xFEFF => 0,
-            0xFF00..=0xFF7F => self.io_registers[addr - 0xFF00],
+            0xFF00..=0xFF7F => self.ppu.io_registers[addr - 0xFF00],
             0xFF80..=0xFFFE => self.memory.high_ram[addr - 0xFF80],
             0xFFFF => self.interrupt_enable_register,
             _ => 0,
@@ -84,25 +93,19 @@ impl CPU {
         match addr {
             0x0000..=0x3FFF => self.memory.rom_bank0[addr] = data,
             0x4000..=0x7FFF => self.memory.rom_bank1[addr - 0x4000] = data,
-            0x8000..=0x9FFF => {
-		let ppu_result = self.ppu.try_write();
-		match ppu_result {
-		    Ok(mut ppu) => ppu.vram[addr - 0x8000] = data,
-		    _ => ()
-		};
+            0x8000..=0x9FFF => match self.mode {
+		Mode::Mode3 => (),
+		_ => self.ppu.vram[addr - 0x8000] = data,
 	    },
             0xA000..=0xBFFF => self.memory.cartridge_ram[addr - 0xA000] = data,
             0xC000..=0xDFFF => self.memory.working_ram[addr - 0xC000] = data,
             0xE000..=0xFDFF => self.memory.echo_ram[addr - 0xE000] = data,
-            0xFE00..=0xFE9F => {
-		let ppu_result = self.ppu.try_write();
-		match ppu_result {
-		    Ok(mut ppu) => ppu.oam[addr - 0xFE00] = data,
-		    _ => (),
-		};
+            0xFE00..=0xFE9F => match self.mode {
+		Mode::Off | Mode::Mode0 | Mode::Mode1 => self.ppu.oam[addr - 0xFE00] = data,
+		_ => (),
 	    },
             0xFEA0..=0xFEFF => (),
-            0xFF00..=0xFF7F => self.io_registers[addr - 0xFF00] = data,
+            0xFF00..=0xFF7F => self.ppu.io_registers[addr - 0xFF00] = data,
             0xFF80..=0xFFFE => self.memory.high_ram[addr - 0xFF80] = data,
             0xFFFF => self.interrupt_enable_register = data,
             _ => (),
@@ -111,29 +114,26 @@ impl CPU {
     pub fn pop(&mut self) -> u8 {
 	let mut reg_file = self.reg_file;
         self.memory.addr_bus = reg_file.SP;
+        self.addr_bus = self.reg_file.SP;
         let stack_val = self.read();
-        reg_file.SP = reg_file.SP + 1;
+        self.reg_file.SP = self.reg_file.SP + 1;
         stack_val
     }
 
     pub fn push(&mut self, push_reg: Reg8) {
-	let mut reg_file = self.reg_file;
-        reg_file.SP = reg_file.SP - 1;
-        self.memory.addr_bus = reg_file.SP;
-        self.write_data(reg_file[push_reg]);
+        self.reg_file.SP = self.reg_file.SP - 1;
+        self.addr_bus = self.reg_file.SP;
+        self.write_data(self.reg_file[push_reg]);
     }
 
     pub fn push_val(&mut self, val: u8) {
-	let mut reg_file = self.reg_file;
-        reg_file.SP = reg_file.SP - 1;
-        self.memory.addr_bus = reg_file.SP;
+        self.reg_file.SP = self.reg_file.SP - 1;
+        self.addr_bus = self.reg_file.SP;
         self.write_data(val);
     }
 }
 
-
-
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Reg8 {
     A,
     B,
