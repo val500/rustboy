@@ -1,14 +1,5 @@
-use crate::instructions::{instruction_decode, StagePassThrough, CC};
-use crate::ppu::{PPU, ppu_execute};
+use crate::{instructions::{instruction_decode, StagePassThrough, CC}, ppu::{Mode, PPU}};
 use std::ops::{Index, IndexMut};
-use std::sync::mpsc::channel;
-use std::thread;
-use std::{
-    sync::{Arc, Mutex, RwLock},
-    time::Duration,
-};
-
-type Tile = [u16; 8];
 
 pub struct CPU {
     pub reg_file: RegFile,
@@ -40,10 +31,8 @@ impl CPU {
         let mut instruction = pass_in.0;
 	let mut pass = pass_in.1;
 	for _ in 0..n {
-	    pass = instruction_decode(instruction, self, pass);
-            self.pc = pass.next_pc;
-            if pass.instruction_stage == 0 {
-                self.memory.addr_bus = self.pc;
+	    if pass.instruction_stage == 0 {
+                self.addr_bus = self.pc;
                 instruction = self.read();
                 if pass.ei {
                     self.ime = true;
@@ -53,18 +42,16 @@ impl CPU {
                     pass.di = false;
                 }
             }
+	    println!("inst: 0x{:x}", instruction);
+	    pass = instruction_decode(instruction, self, pass);
+	    self.pc = pass.next_pc;
+	    println!("pc: 0x{:x}", self.pc);
+	    if self.mode == Mode::Off && self.ppu.io_registers[0x40] >> 7 == 1 {
+		return (instruction, pass)
+	    }
 	}
 	(instruction, pass)
     }
-    fn update_canvas(canvas: &mut Canvas<Window>, color_row: Vec<GameboyColor>, scanline: u8) {
-        canvas.set_draw_color(GameboyColor::White);
-        canvas.clear();
-        for x in 0..160 {
-            canvas.set_draw_color(color_row[x]);
-            canvas.draw_point((x as i32, scanline as i32)).unwrap();
-        }
-    }
-
     pub fn read(&self) -> u8 {
         let addr = self.addr_bus as usize;
         match addr {
@@ -74,7 +61,7 @@ impl CPU {
 		Mode::Mode3 => 0xFF,
 		_ => self.ppu.vram[addr - 0x8000],
 	    },
-            0xA000..=0xBFFF => self.memory.cartridge_ram[addr - 0xA000],
+            0xA000..=0xBFFF => self.memory.external_ram[addr - 0xA000],
             0xC000..=0xDFFF => self.memory.working_ram[addr - 0xC000],
             0xE000..=0xFDFF => self.memory.echo_ram[addr - 0xE000],
             0xFE00..=0xFE9F => match self.mode {
@@ -89,7 +76,7 @@ impl CPU {
         }
     }
     pub fn write_data(&mut self, data: u8) {
-        let addr = self.memory.addr_bus as usize;
+        let addr = self.addr_bus as usize;
         match addr {
             0x0000..=0x3FFF => self.memory.rom_bank0[addr] = data,
             0x4000..=0x7FFF => self.memory.rom_bank1[addr - 0x4000] = data,
@@ -97,7 +84,7 @@ impl CPU {
 		Mode::Mode3 => (),
 		_ => self.ppu.vram[addr - 0x8000] = data,
 	    },
-            0xA000..=0xBFFF => self.memory.cartridge_ram[addr - 0xA000] = data,
+            0xA000..=0xBFFF => self.memory.external_ram[addr - 0xA000] = data,
             0xC000..=0xDFFF => self.memory.working_ram[addr - 0xC000] = data,
             0xE000..=0xFDFF => self.memory.echo_ram[addr - 0xE000] = data,
             0xFE00..=0xFE9F => match self.mode {
@@ -112,8 +99,6 @@ impl CPU {
         };
     }
     pub fn pop(&mut self) -> u8 {
-	let mut reg_file = self.reg_file;
-        self.memory.addr_bus = reg_file.SP;
         self.addr_bus = self.reg_file.SP;
         let stack_val = self.read();
         self.reg_file.SP = self.reg_file.SP + 1;
@@ -163,7 +148,7 @@ pub struct Flags {
     pub C: u8,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct RegFile {
     pub A: u8,
     pub B: u8,
@@ -179,14 +164,25 @@ pub struct RegFile {
 }
 
 pub struct Memory {
-    pub addr_bus: u16,
-    rom_bank0: [u8; 0x00FF],       // 0x0000 - 0x00FF
-    rom_bank1: [u8; 0x3FFF],       // 0x0000 - 0x3FFF
-    cartridge_ram: [u8; 0x1FFF],   // 0xA000 - 0xBFFF
-    working_ram: [u8; 0x1FFF],     // 0xC000 - 0xDFFF
-    echo_ram: [u8; 0x1DFF],        // 0xE000 - 0xFDFF
-    high_ram: [u8; 0x007E],        // 0xFF80 - 0xFFFE
-    
+    pub rom_bank0: [u8; 0x4000],       // 0x0000 - 0x3FFF
+    rom_bank1: [u8; 0x4000],       // 0x4000 - 0x7FFF
+    external_ram: [u8; 0x2000],   // 0xA000 - 0xBFFF
+    working_ram: [u8; 0x2000],     // 0xC000 - 0xDFFF
+    echo_ram: [u8; 0x1E00],        // 0xE000 - 0xFDFF
+    high_ram: [u8; 0x007F],        // 0xFF80 - 0xFFFE
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+	Memory {
+	    rom_bank0: [0; 0x4000],
+	    rom_bank1: [0; 0x4000],
+	    external_ram: [0; 0x2000],
+	    working_ram: [0; 0x2000],
+	    echo_ram: [0; 0x1E00],
+	    high_ram: [0; 0x007F],
+	}
+    }
 }
 
 

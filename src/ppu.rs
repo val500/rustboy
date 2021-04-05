@@ -1,18 +1,9 @@
-use queue::Queue;
 use sdl2::pixels::Color;
 use sdl2::render::Canvas;
 use sdl2::video::Window;
-use std::sync::mpsc::{channel, Receiver};
-use std::thread;
-use std::{
-    sync::{Arc, Mutex, RwLock},
-    time::Duration,
-};
 
-type Tile = [u16; 8];
-
-#[derive(Clone, Copy)]
-enum GameboyColor {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GameboyColor {
     Transparent,
     White,
     LightGray,
@@ -28,39 +19,6 @@ impl Into<Color> for GameboyColor {
             GameboyColor::Black => Color::RGB(15, 56, 15),
             GameboyColor::Transparent => Color::RGB(15, 56, 15),
         }
-    }
-}
-
-pub fn ppu_execute(ppu_lock: Arc<RwLock<PPU>>, barrier: Arc<Barrier>) {
-    let sdl_context = sdl2::init().unwrap();
-    let video_subsystem = sdl_context.video().unwrap();
-    let window = video_subsystem.window("Gameboy Window", 160, 144).build().unwrap();
-    let mut canvas : Canvas<Window> = window.into_canvas()
-	.present_vsync() 
-	.build().unwrap();
-    
-    loop {
-	let lcdc = {
-	    ppu_lock.read().unwrap().io_registers[0x40]
-	};
-
-	if lcdc >> 7 != 1 {
-	    PPU::clear_canvas(&mut canvas);
-	} else {
-	    for scanline in 0..144 {
-		let pixel_row;
-		{
-		    let ppu = ppu_lock.read().unwrap();
-		    let sprites = ppu.object_search(scanline);
-		    barrier.wait();
-		    pixel_row = ppu.draw(scanline, sprites);
-		}
-		barrier.wait();
-		PPU::update_canvas(&mut canvas, pixel_row, scanline);
-		barrier.wait();
-	    }
-	}
-	barrier.wait();
     }
 }
 
@@ -173,11 +131,11 @@ impl PPU {
     }
 
     pub fn update_canvas(canvas: &mut Canvas<Window>, color_row: Vec<GameboyColor>, scanline: u8) {
-        for x in 0..160 {
-            for y in 0..144 {
-                canvas.set_draw_color(self.screen[x][y]);
-                canvas.draw_point((x as i32, y as i32)).unwrap();
-            }
+	let mut i = 0;
+        for color in color_row {
+	    canvas.set_draw_color(color);
+            canvas.draw_point((i as i32, scanline as i32)).unwrap();
+	    i += 1;
         }
         canvas.present();
     }
@@ -204,15 +162,15 @@ impl PPU {
         let use_window = cur_scanline as i16 >= window_y && tile_x as i16 * 8 >= window_x - 7;
 
         let fetcher_y = if use_window {
-            cur_scanline - window_y
+            cur_scanline as i16 - window_y
         } else {
-            (cur_scanline + scroll_y) & 0xFF
+            (cur_scanline as i16 + scroll_y) & 0xFF
         };
 
         let fetcher_x = if use_window {
-            (tile_x * 8) - (window_x - 7)
+            (tile_x as i16 * 8) - (window_x - 7)
         } else {
-            ((scroll_x / 8) + tile_x) & 0x1F
+            ((scroll_x / 8) + tile_x as i16) & 0x1F
         };
 
         let tilemap_base: u16 = if use_window {
@@ -236,7 +194,6 @@ impl PPU {
         &self,
         tile_index: u8,
         cur_scanline: u8,
-        io_registers: &[u8; 0x007F],
     ) -> u8 {
 	
 	let lcdc;
@@ -258,7 +215,6 @@ impl PPU {
         &self,
         tile_index: u8,
         cur_scanline: u8,
-        io_registers: &[u8; 0x007F],
     ) -> u8 {
         let tile_row = (cur_scanline % 8) as u16;
         let lcdc;
@@ -297,7 +253,7 @@ fn check_bit(num: u8, bit_num: u8) -> bool {
 }
 
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Mode {
     Mode0,
     Mode1,

@@ -8,4 +8,5 @@ edition = "2018"
 
 [dependencies]
 queue = "0.3"
-sdl2 = "0.34"	
+sdl2 = "0.34"
+spin_sleep = "1.0.0"
