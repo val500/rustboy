@@ -66,12 +66,14 @@ impl<'a> Gameboy {
         texture_creator: &'a TextureCreator<WindowContext>,
         canvas: &mut Canvas<Window>,
     ) {
-        let mut loop_helper = LoopHelper::builder().build_with_target_rate(60.0);
+        let mut loop_helper = LoopHelper::builder().report_interval_s(0.5).build_with_target_rate(59.7);
         let mut event_pump = sdl_context.event_pump().unwrap();
         let mut texture: Texture = texture_creator
             .create_texture_streaming(PixelFormatEnum::ARGB8888, 160, 144)
             .unwrap();
-
+	
+	let mut frame_buffer: [u8; 92160] = [0; 92160];
+	let mut current_fps = None;
         'running: loop {
             for event in event_pump.poll_iter() {
                 match event {
@@ -83,6 +85,11 @@ impl<'a> Gameboy {
                     _ => {}
                 }
             }
+
+	    if let Some(fps) = loop_helper.report_rate() {
+		current_fps = Some(fps.round());
+		println!("current fps: {}", current_fps.unwrap());
+	    }
 
             while self.cpu.ppu.io_registers.lcdc.lcd_ppu_enable == 0 {
                 self.cpu.step(false);
@@ -111,7 +118,7 @@ impl<'a> Gameboy {
                         self.cpu.step(false);
                     }
                     //println!("vram: {:?}", self.cpu.ppu.vram);
-                    Gameboy::write_line_to_texture(&mut texture, color_line, scanline);
+                    Gameboy::write_line_to_frame_buffer(&mut frame_buffer, color_line, scanline);
                     for _i in 0..MODE0_CYCLES {
                         self.cpu.step(false);
                     }
@@ -121,28 +128,28 @@ impl<'a> Gameboy {
                     }
                 }
             }
+	    texture
+                .with_lock(None, |buffer: &mut [u8], _pitch: usize| {
+                    for (i, el) in frame_buffer.iter().enumerate() {
+                        buffer[i] = *el;
+                    }
+                })
+                .unwrap();
             canvas.copy(&texture, None, None).unwrap();
             canvas.present();
             loop_helper.loop_sleep();
         }
     }
 
-    pub fn write_line_to_texture(
-        texture: &mut Texture,
+    pub fn write_line_to_frame_buffer(
+        frame_buffer: &mut [u8; 92160],
         color_line: Vec<GameboyColor>,
         scanline: u8,
     ) {
         let color_line: Vec<u32> = color_line.iter().map(|color| color.into()).collect();
         for (index, color) in color_line.iter().enumerate() {
-            let mut colors: [u8; 4] = [0; 4];
-            NativeEndian::write_u32(&mut colors, *color);
-            texture
-                .with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                    for i in 0..4 {
-                        buffer[scanline as usize * pitch + 4 * index + i] = colors[i];
-                    }
-                })
-                .unwrap();
+	    let begin_index = scanline as usize * 160 * 4 + 4 * index;
+            NativeEndian::write_u32(&mut frame_buffer[begin_index .. begin_index + 4], *color);
         }
     }
 }
