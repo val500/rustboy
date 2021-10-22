@@ -2,6 +2,9 @@
 ## Gameboy Emulator Written in Rust
 * I am mainly making this to learn more about old architectures and as a fun learning project to get better as Rust. Not neccessarily the most accurate/correct emulation of the GameBoy.
 ## Progress
+### 10/21/21
+* Graphics are working with the bootrom sourced from Bootix.
+* Running very slowly
 ### 1/11/21
 * Instructions have been "finished", still need to be tested
 * I started adding graphics logic
