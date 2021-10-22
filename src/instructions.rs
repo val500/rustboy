@@ -1,6 +1,5 @@
 use crate::cpu::{Flags, Reg16, Reg8, RegFile, CPU};
 
-use std::io;
 #[derive(Clone, Copy, Default, Debug)]
 pub struct StagePassThrough {
     data: u8,
@@ -37,7 +36,7 @@ pub fn instruction_decode(opcode: u8, cpu: &mut CPU, passed: StagePassThrough) -
         n @ (0x05 | 0x15 | 0x25 | 0x0D | 0x1D | 0x2D | 0x3D) => dec(cpu, passed, n),
         n @ (0x0B | 0x1B | 0x2B | 0x3B) => dec_rr(reg_file, n, passed),
         n @ (0x06 | 0x16 | 0x26 | 0x0E | 0x1E | 0x2E | 0x3E) => ld_r_n(cpu, n, passed),
-
+	n @ (0x46 | 0x56 | 0x66 | 0x4E | 0x5E | 0x6E | 0x7E) => ld_r_hl(cpu, n, passed),
         n @ (0x0A | 0x1A) => ld_a_16(cpu, n, passed),
         0x07 => rlca(reg_file, passed),
         0x17 => rla(reg_file, passed),
@@ -132,6 +131,7 @@ pub fn instruction_decode(opcode: u8, cpu: &mut CPU, passed: StagePassThrough) -
         0xF9 => ld_sp_hl(reg_file, passed),
 	0xF3 => di(passed),
 	0xFb => ei(passed),
+	0xD9 => reti(cpu, passed),
         _ => panic!("Invalid instruction: {:#x}", opcode),
     }
 }
@@ -179,11 +179,39 @@ fn jr_cc_e(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
             pass_to_next_stage.next_pc = passed.next_pc + 1;
         }
         2 => {
-	    println!("passed data: 0x{:x}", passed.data);
             pass_to_next_stage.next_pc = (passed.next_pc as i16 + (passed.data as i8 as i16)) as u16;
             pass_to_next_stage.instruction_stage = 0;
         }
         _ => panic!("jr_cc_ee: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_r_hl(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+	0 => {
+	    cpu.addr_bus = cpu.reg_file.get16(Reg16::HL);
+	    pass_to_next_stage.data = cpu.read();
+	    pass_to_next_stage.next_pc = passed.next_pc;
+	    pass_to_next_stage.instruction_stage = 1;
+	}
+	1 => {
+	    let reg8 = match n {
+		0x46 => Reg8::B,
+		0x56 => Reg8::D,
+		0x66 => Reg8::H,
+		0x4E => Reg8::C,
+		0x5E => Reg8::E,
+		0x6E => Reg8::L,
+		0x7E => Reg8::A,
+		_ => panic!("invalid n"),
+	    };
+	    cpu.reg_file[reg8] =  passed.data;
+	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    pass_to_next_stage.instruction_stage = 0;
+	}
+	_ => panic!("ld_r_hl: invalid instruction stage"),
     }
     pass_to_next_stage
 }
@@ -243,7 +271,6 @@ fn ld_16_a(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
                 cpu.reg_file.set16(Reg16::HL, cpu.reg_file.get16(Reg16::HL)
 .wrapping_add(1));
             } else if n == 0x32 {
-		println!("hl: {:x}", cpu.reg_file.get16(Reg16::HL));
                 cpu.reg_file.set16(Reg16::HL, cpu.reg_file.get16(Reg16::HL).wrapping_sub(1));
             }
         }
@@ -284,10 +311,6 @@ fn ld_a_16(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
 
 fn ld_r_n(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
     let mut pass_to_next_stage = StagePassThrough::default();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)
-        .ok()
-        .expect("Couldn't read line"); 
     match passed.instruction_stage {
         0 => {
             pass_to_next_stage.next_pc = passed.next_pc + 1;
@@ -1009,6 +1032,34 @@ fn ret(cpu: &mut CPU, passed: StagePassThrough) -> StagePassThrough {
     pass_to_next_stage
 }
 
+fn reti(cpu: &mut CPU, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+        0 => {
+            pass_to_next_stage.data = cpu.pop();
+            pass_to_next_stage.instruction_stage = 1;
+            pass_to_next_stage.next_pc = passed.next_pc;
+        }
+        1 => {
+            pass_to_next_stage.data16 = ((cpu.pop() as u16) << 8) | passed.data as u16;
+            pass_to_next_stage.instruction_stage = 2;
+            pass_to_next_stage.next_pc = passed.next_pc;
+        }
+        2 => {
+            pass_to_next_stage.data16 = passed.data16;
+            pass_to_next_stage.instruction_stage = 3;
+            pass_to_next_stage.next_pc = passed.next_pc;
+        }
+        3 => {
+            pass_to_next_stage.next_pc = passed.data16;
+            pass_to_next_stage.instruction_stage = 0;
+	    cpu.ime = true;
+        }
+        _ => panic!("ret: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
 fn ret_cc(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
     let mut pass_to_next_stage = StagePassThrough::default();
     let cc = match n {
@@ -1065,15 +1116,9 @@ fn ldh_n_a(cpu: &mut CPU, passed: StagePassThrough) -> StagePassThrough {
         1 => {
             cpu.addr_bus = 0xFF00 | passed.data as u16;
             cpu.write_data(cpu.reg_file[Reg8::A]);
-	    println!("addr: {:#x}", cpu.addr_bus);
             cpu.write_data(cpu.reg_file[Reg8::A]);
             pass_to_next_stage.instruction_stage = 2;
             pass_to_next_stage.next_pc = passed.next_pc;
-
-	    let mut user_input = String::new();
-            io::stdin()
-                .read_line(&mut user_input)
-                .expect("Failed to read line");
         }
         2 => {
             pass_to_next_stage.next_pc = passed.next_pc + 1;
@@ -1341,6 +1386,8 @@ fn alu_imm(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
                 cpu.reg_file[Reg8::A] = tup.0;
             }
             cpu.reg_file.flags = tup.1;
+	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    pass_to_next_stage.instruction_stage = 0;
         }
         _ => panic!("inst_name: invalid instruction stage"),
     }
@@ -1409,6 +1456,35 @@ fn ld_hl_sp_e(cpu: &mut CPU, passed: StagePassThrough) -> StagePassThrough {
             pass_to_next_stage.next_pc = passed.next_pc + 1;
         }
         _ => panic!("inst_name: invalid instruction stage"),
+    }
+    pass_to_next_stage
+}
+
+fn ld_nn_sp(cpu: &mut CPU, passed: StagePassThrough) -> StagePassThrough {
+    let mut pass_to_next_stage = StagePassThrough::default();
+    match passed.instruction_stage {
+	0 => {
+	    cpu.addr_bus = passed.next_pc + 1;
+	    pass_to_next_stage.data16 = cpu.read() as u16;
+	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    pass_to_next_stage.instruction_stage = 1;
+	}
+	1 => {
+	    cpu.addr_bus = passed.next_pc + 1;
+	    pass_to_next_stage.data16 = (passed.data16 << 8) | (cpu.read() as u16);
+	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    pass_to_next_stage.instruction_stage = 2;
+	}
+	2 => {
+	    cpu.addr_bus = passed.data16;
+	    pass_to_next_stage.data16 = cpu.read() as u16;
+	    pass_to_next_stage.next_pc = passed.next_pc + 1;
+	    pass_to_next_stage.instruction_stage = 3;
+	}
+	3 => {
+
+	}
+	_ => panic!("ld_nn_sp: invalid instruction stage"),
     }
     pass_to_next_stage
 }
@@ -1924,9 +2000,6 @@ fn bit(cpu: &mut CPU, n: u8, passed: StagePassThrough) -> StagePassThrough {
                 flags.Z = if (cpu.reg_file[reg8] & mask) == 0 { 1 } else { 0 };
                 pass_to_next_stage.next_pc = passed.next_pc + 1;
                 pass_to_next_stage.instruction_stage = 0;
-
-		println!("woah2: {:#x}, mask: {:#x}, flags: {:?}", cpu.reg_file[reg8], mask,flags);
-
             } else {
                 let mask = 1 << bit_num;
                 cpu.addr_bus = cpu.reg_file.get16(Reg16::HL);

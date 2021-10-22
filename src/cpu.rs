@@ -1,4 +1,5 @@
-use crate::{instructions::{instruction_decode, StagePassThrough, CC}, ppu::{Mode, PPU}};
+#![allow(non_snake_case)]
+use crate::{instructions::{instruction_decode, StagePassThrough, CC}, ppu::{Mode, PPU}, register_maps::{InterruptEnable, InterruptFlag}};
 use std::ops::{Index, IndexMut};
 
 pub struct CPU {
@@ -7,9 +8,10 @@ pub struct CPU {
     pub memory: Memory,
     pub pc: u16,
     pub ppu: PPU,
-    ime: bool,
-    interrupt_enable_register: u8, // 0xFFFF
+    pub ime: bool,
+    pub interrupt_enable_register: u8, // 0xFFFF
     pub mode: Mode,
+    pub pass_in: (u8, StagePassThrough),
 }
 
 impl CPU {
@@ -20,38 +22,81 @@ impl CPU {
             memory: Memory::default(),
             pc: 0,
             ppu,
-            ime: true,
+            ime: false,
             interrupt_enable_register: 0,
             mode: Mode::Off,
+	    pass_in: (0, StagePassThrough::default()),
         }
     }
 
-    pub fn execute_n_cycles(&mut self, debug: bool, n: u16, pass_in: (u8, StagePassThrough)) -> (u8, StagePassThrough) {
-	self.addr_bus = self.pc;
-        let mut instruction = pass_in.0;
-	let mut pass = pass_in.1;
-	for _ in 0..n {
-	    if pass.instruction_stage == 0 {
-                self.addr_bus = self.pc;
-                instruction = self.read();
-                if pass.ei {
-                    self.ime = true;
-                    pass.ei = false;
-                } else if pass.di {
-                    self.ime = false;
-                    pass.di = false;
-                }
-            }
-	    println!("inst: 0x{:x}", instruction);
-	    pass = instruction_decode(instruction, self, pass);
-	    self.pc = pass.next_pc;
-	    println!("pc: 0x{:x}", self.pc);
-	    if self.mode == Mode::Off && self.ppu.io_registers[0x40] >> 7 == 1 {
-		return (instruction, pass)
-	    }
+    pub fn handle_interrupts(&mut self) {
+	let enabled: InterruptEnable = self.ppu.io_registers.ie;
+	let mut flags: InterruptFlag = self.ppu.io_registers.interrupt_flag;
+	self.ime = false;
+	if enabled.vblank == 1 && flags.vblank == 1{
+	    self.push_val((self.pc >> 8) as u8);
+	    self.push_val(self.pc as u8);
+	    self.pc = 0x40;
+	    flags.vblank = 0;
+	    self.ppu.io_registers.interrupt_flag = flags;
+	} else if enabled.lcd_stat == 1 && flags.lcd_stat == 1 {
+	    self.push_val((self.pc >> 8) as u8);
+	    self.push_val(self.pc as u8);
+	    self.pc = 0x48;
+	    flags.lcd_stat = 0;
+	    self.ppu.io_registers.interrupt_flag = flags;
+	} else if enabled.timer == 1 && flags.timer == 1 {
+	    self.push_val((self.pc >> 8) as u8);
+	    self.push_val(self.pc as u8);
+	    self.pc = 0x50;
+	    flags.timer = 0;
+	    self.ppu.io_registers.interrupt_flag = flags;
+	} else if enabled.serial == 1 && flags.serial == 1 {
+	    self.push_val((self.pc >> 8) as u8);
+	    self.push_val(self.pc as u8);
+	    self.pc = 0x58;
+	    flags.serial = 0;
+	    self.ppu.io_registers.interrupt_flag = flags;
+	} else if enabled.joypad == 1 && flags.joypad == 1 {
+	    self.push_val((self.pc >> 8) as u8);
+	    self.push_val(self.pc as u8);
+	    self.pc = 0x60;
+	    flags.joypad = 0;
+	    self.ppu.io_registers.interrupt_flag = flags;
+	} else {
+	    self.ime = true;
 	}
-	(instruction, pass)
     }
+
+    pub fn step_cpu(&mut self, debug: bool) {
+        let mut instruction = self.pass_in.0;
+	let mut pass = self.pass_in.1;
+	if pass.instruction_stage == 0 {
+	    if self.ime {
+		self.handle_interrupts();
+	    }
+            self.addr_bus = self.pc;
+            instruction = self.read();
+            if pass.ei {
+                self.ime = true;
+                pass.ei = false;
+            }
+	    
+        }
+	pass = instruction_decode(instruction, self, pass);
+	if pass.di {
+            self.ime = false;
+            pass.di = false;
+        }
+	self.pc = pass.next_pc;
+	self.pass_in = (instruction, pass)
+    }
+
+    pub fn step(&mut self, debug: bool) {
+	self.step_cpu(debug);
+	
+    }
+
     pub fn read(&self) -> u8 {
         let addr = self.addr_bus as usize;
         match addr {
@@ -69,7 +114,7 @@ impl CPU {
 		_ => 0xFF,
 	    }
             0xFEA0..=0xFEFF => 0,
-            0xFF00..=0xFF7F => self.ppu.io_registers[addr - 0xFF00],
+            0xFF00..=0xFF7F => self.ppu.io_registers.get(addr),
             0xFF80..=0xFFFE => self.memory.high_ram[addr - 0xFF80],
             0xFFFF => self.interrupt_enable_register,
             _ => 0,
@@ -92,7 +137,7 @@ impl CPU {
 		_ => (),
 	    },
             0xFEA0..=0xFEFF => (),
-            0xFF00..=0xFF7F => self.ppu.io_registers[addr - 0xFF00] = data,
+            0xFF00..=0xFF7F => self.ppu.io_registers.set(addr, data),
             0xFF80..=0xFFFE => self.memory.high_ram[addr - 0xFF80] = data,
             0xFFFF => self.interrupt_enable_register = data,
             _ => (),

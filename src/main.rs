@@ -1,46 +1,32 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 #![feature(wrapping_int_impl)]
-use std::fs;
 mod cpu;
 mod gameboy;
 mod instructions;
 mod ppu;
-use sdl2::{event::Event, keyboard::Keycode, pixels::Color, render::Canvas, video::Window};
+mod register_maps;
+use sdl2::{
+    render::{Canvas, TextureCreator},
+    video::{Window, WindowContext},
+};
+
+const X_DIM: u32 = 160;
+const Y_DIM: u32 = 144;
+const SCALE: u32 = 4;
 
 fn main() {
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+    let window = video_subsystem
+        .window("Gameboy Window", X_DIM * SCALE, Y_DIM * SCALE)
+        .opengl()
+        .build()
+        .unwrap();
+    let mut canvas: Canvas<Window> = window.into_canvas().present_vsync().build().unwrap();
+    canvas.set_scale(SCALE as f32, SCALE as f32).unwrap();
+    let texture_creator: TextureCreator<WindowContext> = canvas.texture_creator();
     let mut gameboy = gameboy::Gameboy::new();
-    println!("Starting up!");
-    let binary = &fs::read("bootix_dmg.bin").unwrap();
-    let mut i = 0;
-    for el in binary {
-        gameboy.cpu.memory.rom_bank0[i] = el.clone();
-        i = i + 1;
-    }
-    gameboy.run_emulator();
-}
-
-#[cfg(test)]
-mod test {
-    use instructions::StagePassThrough;
-
-    use super::*;
-
-    #[test]
-    fn test_cpu() {
-	let mut gameboy = gameboy::Gameboy::new();
-	let binary = &fs::read("bootix_dmg.bin").unwrap();
-	println!("{}", binary.len());
-	let mut i = 0;
-	for el in binary {
-            gameboy.cpu.memory.rom_bank0[i] = el.clone();
-            i = i + 1;
-	}
-	let mut passed = gameboy.cpu.execute_n_cycles(false, 10, (0, StagePassThrough::default()));
-	println!("{:x?}", passed);
-	while passed.1.next_pc <= 0xc {
-	    passed = gameboy.cpu.execute_n_cycles(false, 100, passed);
-	}
-	println!("{:x?}", passed);
-    }
+    gameboy.init_gameboy();
+    gameboy.run_emulator(&sdl_context, &texture_creator, &mut canvas);
 }
