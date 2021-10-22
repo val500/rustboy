@@ -4,7 +4,7 @@
 ## Progress
 ### 10/21/21
 * Graphics are working with the bootrom sourced from Bootix.
-* Running very slowly
+* Running at 60 fps
 ### 1/11/21
 * Instructions have been "finished", still need to be tested
 * I started adding graphics logic
